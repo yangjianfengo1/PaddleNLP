@@ -151,7 +151,6 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         resnet_pre_temb_non_linearity: Optional[bool] = False,
     ):
         super().__init__()
-
         self.sample_size = sample_size
 
         # Check inputs
@@ -504,6 +503,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         sample: paddle.Tensor,
         timestep: Union[paddle.Tensor, float, int],
         encoder_hidden_states: paddle.Tensor,
+        lora_idx_list: List[int] = None,
+        lora_alpha_list: List[float] = None,
         class_labels: Optional[paddle.Tensor] = None,
         timestep_cond: Optional[paddle.Tensor] = None,
         attention_mask: Optional[paddle.Tensor] = None,

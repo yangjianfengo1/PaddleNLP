@@ -591,6 +591,111 @@ class CLIPTextTransformer(nn.Layer):
         )
 
 
+class LoraCLIPTextTransformer(CLIPTextTransformer):
+    def __init__(self, config: CLIPTextConfig):
+        super().__init__(config)
+
+    def load_lora_weight(self, weight: dict):
+        self.lora_weight = weight
+
+    def update_lora_weight(self, lora_idx_list: list, lora_alpha_list: list):
+        for name, op in self.transformer.named_sublayers():
+            if name in self.lora_weight:
+                new_weight = op.weight
+                for idx, alppha in zip(lora_idx_list, lora_alpha_list):
+                    new_weight += alppha * self.lora_weight[name][idx].T
+                op.weight.set_value(new_weight)      
+
+    def forward(
+        self,
+        input_ids: Optional[paddle.Tensor] = None,
+        attention_mask: Optional[paddle.Tensor] = None,
+        position_ids: Optional[paddle.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        lora_idx_list: list = None,
+        lora_alpha_list: list = None,
+    ) -> Union[Tuple, BaseModelOutputWithPooling]:
+        r"""
+        Args:
+            input_ids (`paddle.Tensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you provide
+                it.
+                Indices can be obtained using [`CLIPTokenizer`].
+            attention_mask (`paddle.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+                - 1 for tokens that are **not masked**,
+                - 0 for tokens that are **masked**.
+            position_ids (`paddle.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Indices of positions of each input sequence tokens in the position embeddings. Selected in the range `[0,
+                config.max_position_embeddings - 1]`.
+            output_attentions (`bool`, *optional*):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+                tensors for more detail.
+            output_hidden_states (`bool`, *optional*):
+                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+                more detail.
+            return_dict (`bool`, *optional*):
+                Whether or not to return a [`BaseModelOutputWithPooling`] instead of a plain tuple.
+        """
+        self.update_lora_weight(lora_idx_list, lora_alpha_list)
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        bs, seqlen = input_ids.shape
+        if position_ids is None:
+            position_ids = self.position_ids[:, :seqlen].cast("int64")
+
+        embedding_output = self.token_embedding(input_ids) + self.positional_embedding(
+            position_ids
+        )  # [batch_size, n_ctx, d_model]
+
+        causal_mask = self.causal_mask[:, :, :seqlen, :seqlen]
+        if attention_mask is not None:
+            assert attention_mask.ndim == 2
+            expanded_mask = attention_mask[:, None, None, :].expand([bs, 1, seqlen, -1]).cast(causal_mask.dtype)
+            inverted_mask = (1.0 - expanded_mask) * NEG_INF
+            attention_mask = inverted_mask + causal_mask
+        else:
+            attention_mask = causal_mask
+        attention_mask.stop_gradient = True
+
+        encoder_outputs = self.transformer(
+            embedding_output,
+            src_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        if isinstance(encoder_outputs, type(embedding_output)):
+            last_hidden_state = encoder_outputs
+        else:
+            last_hidden_state = encoder_outputs[0]
+
+        last_hidden_state = self.ln_final(last_hidden_state)
+
+        pooled_output = last_hidden_state.gather_nd(
+            paddle.stack([paddle.arange(bs, dtype="int32"), input_ids.argmax(-1, dtype="int32")], axis=-1)
+        )
+        if isinstance(encoder_outputs, type(embedding_output)):
+            return (last_hidden_state, pooled_output)
+
+        if not return_dict:
+            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        ) 
+
+
 class CLIPTextModel(CLIPPretrainedModel):
     r"""
     The text model from CLIP without any head or projection on top.
@@ -609,10 +714,14 @@ class CLIPTextModel(CLIPPretrainedModel):
     config_class = CLIPTextConfig
 
     def __init__(self, config: CLIPTextConfig):
+        
         super().__init__(config)
-        self.text_model = CLIPTextTransformer(config)
+        self.text_model = LoraCLIPTextTransformer(config)
 
         self.init_weights()
+
+    def load_lora_weight(self, weight: dict):
+        self.text_model.load_lora_weight(weight)
 
     def get_input_embeddings(self) -> nn.Layer:
         return self.text_model.token_embedding
@@ -623,6 +732,8 @@ class CLIPTextModel(CLIPPretrainedModel):
     def forward(
         self,
         input_ids: Optional[paddle.Tensor] = None,
+        lora_idx_list: list = None,
+        lora_alpha_list: list = None,
         attention_mask: Optional[paddle.Tensor] = None,
         position_ids: Optional[paddle.Tensor] = None,
         output_attentions: Optional[bool] = None,
@@ -679,6 +790,8 @@ class CLIPTextModel(CLIPPretrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            lora_idx_list=lora_idx_list,
+            lora_alpha_list=lora_alpha_list
         )
 
 
