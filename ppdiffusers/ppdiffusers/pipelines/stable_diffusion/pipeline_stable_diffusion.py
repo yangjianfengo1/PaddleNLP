@@ -78,7 +78,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
     def __init__(
         self,
         vae: AutoencoderKL,
-        text_encoder: LoraCLIPTextModel,
+        text_encoder: CLIPTextModel,
         tokenizer: CLIPTokenizer,
         unet: UNet2DConditionModel,
         scheduler: KarrasDiffusionSchedulers,

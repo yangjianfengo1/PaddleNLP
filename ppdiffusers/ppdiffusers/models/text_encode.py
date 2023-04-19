@@ -5,9 +5,14 @@ import paddle
 import paddle.nn.functional as F
 from paddle import nn
 from typing import Any, Optional, Tuple, Union
+from .modeling_utils import ModelMixin
+from ..configuration_utils import ConfigMixin, register_to_config
 
 
 class LoraCLIPTextTransformer(CLIPTextTransformer):
+    _supports_gradient_checkpointing = True
+
+    @register_to_config
     def __init__(self, config: CLIPTextConfig):
         super().__init__(config)
 
@@ -44,7 +49,7 @@ class LoraCLIPTextTransformer(CLIPTextTransformer):
             lora_idx_list,
             lora_alpha_list)
         
-class LoraCLIPTextModel(CLIPTextModel):
+class LoraCLIPTextModel(ModelMixin, ConfigMixin, CLIPTextModel):
     def __init__(self, config: CLIPTextConfig):
         print("##### LoraCLIPTextModel")
         super().__init__(config)

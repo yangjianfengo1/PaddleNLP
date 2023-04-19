@@ -150,6 +150,8 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         projection_class_embeddings_input_dim: Optional[int] = None,
         resnet_pre_temb_non_linearity: Optional[bool] = False,
     ):
+        self.lora_idx_list = []
+        self.lora_alpha_list = []
         super().__init__()
         self.sample_size = sample_size
 
@@ -498,6 +500,30 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D, CrossAttnUpBlock2D, UpBlock2D)):
             module.gradient_checkpointing = value
 
+    def load_lora_weight(self, weight: dict):
+        self.lora_weight = weight
+
+    def update_lora_weight(self, lora_idx_list: List[int], lora_alpha_list: List[float]):
+        if (self.lora_idx_list != lora_idx_list or self.lora_alpha_list != lora_alpha_list):
+            self.update_block_weight(lora_idx_list, lora_alpha_list, "up_blocks.", self.up_blocks)
+            self.update_block_weight(lora_idx_list, lora_alpha_list, "mid_block.", self.mid_block)
+            self.update_block_weight(lora_idx_list, lora_alpha_list, "down_blocks.", self.down_blocks)
+        self.lora_idx_list = lora_idx_list
+        self.lora_alpha_list = lora_alpha_list
+
+    def update_block_weight(self, lora_idx_list: List[int], lora_alpha_list: List[float], block_profix: str, blocks):
+        for name, op in blocks.named_sublayers():
+            name = block_profix + name
+            if name in self.lora_weight:
+                new_weight = op.weight
+                if op.weight.shape == self.lora_weight[name][0].shape:
+                    for idx, alppha in zip(lora_idx_list, lora_alpha_list):
+                        new_weight += alppha * self.lora_weight[name][idx]
+                else:
+                    for idx, alppha in zip(lora_idx_list, lora_alpha_list):
+                        new_weight += alppha * self.lora_weight[name][idx].T
+                op.weight.set_value(new_weight)
+
     def forward(
         self,
         sample: paddle.Tensor,
@@ -531,6 +557,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             returning a tuple, the first element is the sample tensor.
         """
         # TODO junnyu, add this to support pure fp16
+        self.update_lora_weight(lora_idx_list, lora_alpha_list)
         sample = sample.cast(self.dtype)
 
         # By default samples have to be AT least a multiple of the overall upsampling factor.

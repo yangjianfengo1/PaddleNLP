@@ -46,6 +46,48 @@ def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
             text_encode_lora_weight[name] = layer_weight
     return text_encode_lora_weight
 
+
+def get_unet_lora_weight(lora_state_dict_list, dtype=paddle.float32):
+    unet_lora_weight = {}
+    name_map = [
+        ("_", "."),
+        ("up.blocks", "up_blocks"),
+        ("mid.blocks", "mid_blocks"),
+        ("down.blocks", "down_blocks"),
+        ("transformer.blocks", "transformer_blocks"),
+        ("proj.in", "proj_in"),
+    ]
+    for static_dict in lora_state_dict_list:
+        for key in static_dict:
+            if ".alpha" in key:
+                continue
+            if "lora_unet" in key:
+                if "lora_down" in key:
+                    down_name = key 
+                    up_name = key.replace("lora_down", "lora_up")
+                else:
+                    up_name = key 
+                    down_name = key.replace("lora_up", "lora_down")
+                if len(static_dict[up_name].shape) == 4:
+                    weight_up = paddle.to_tensor(static_dict[up_name].squeeze(3).squeeze(2)).astype(dtype)
+                    weight_down = paddle.to_tensor(static_dict[down_name].squeeze(3).squeeze(2)).astype(dtype)
+                    new_weight = paddle.mm(weight_up, weight_down).unsqueeze(2).unsqueeze(3)
+                else:
+                    weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
+                    weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
+                    new_weight = paddle.mm(weight_up, weight_down)
+                paddle_weight_name = key.replace("lora_unet_", "")
+                paddle_weight_name = paddle_weight_name.replace(".lora_down.weight", "")
+                paddle_weight_name = paddle_weight_name.replace(".lora_up.weight", "")
+                for torch_name, paddle_name in name_map:
+                    paddle_weight_name = paddle_weight_name.replace(torch_name, paddle_name)
+                if (paddle_weight_name in unet_lora_weight):
+                    unet_lora_weight[paddle_weight_name].append(new_weight)
+                else:
+                    unet_lora_weight[paddle_weight_name] = [new_weight]
+    return unet_lora_weight
+
+
 def get_pipeline(model_path):
     unet_model = UNet2DConditionModel.from_pretrained(model_path, resnet_pre_temb_non_linearity=True, subfolder="unet")
     pipeline = StableDiffusionPipeline.from_pretrained(
@@ -56,8 +98,10 @@ def get_pipeline(model_path):
 def run():
     lora_state_dict_list = load_lora_file_weight(lora_file_dir, lora_file_list)
     text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
+    unet_lora_weight = get_unet_lora_weight(lora_state_dict_list)
     pipeline = get_pipeline(model_path)
     pipeline.text_encoder.load_lora_weight(text_encode_lora_weight)
+    pipeline.unet.load_lora_weight(unet_lora_weight)
     image = pipeline(
             prompt="masterpiece, best quality, 1 girl, mecha", 
             lora_idx_list=[0],

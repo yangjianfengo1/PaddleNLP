@@ -72,8 +72,15 @@ def convert_ppdiffusers_pipeline_to_fastdeploy_pipeline(
             paddle.static.InputSpec(
                 shape=[None, None, cross_attention_dim], dtype="float32", name="encoder_hidden_states"
             ),  # encoder_hidden_states
+            paddle.static.InputSpec(
+                shape=[None], dtype="int32", name="lora_idx_list"
+            ),
+            paddle.static.InputSpec(
+                shape=[None], dtype="float32", name="lora_alpha_list"
+            ), 
         ],
     )
+    
     save_path = os.path.join(args.output_path, "unet", "inference")
     paddle.jit.save(unet, save_path)
     print(f"Save unet model in {save_path} successfully.")

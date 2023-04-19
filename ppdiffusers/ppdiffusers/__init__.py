@@ -63,6 +63,7 @@ else:
         UNet2DConditionModel,
         UNet2DModel,
         UNet3DConditionModel,
+        LoraCLIPTextModel,
         VQModel,
     )
     from .optimization import (
