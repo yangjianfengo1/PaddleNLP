@@ -19,7 +19,7 @@ lora_file_list  = ["mecha.safetensors", "Chibi.safetensors", "Colorwater.safeten
 model_path = "./runwayml/stable-diffusion-v1-5"
 layers_num = 12
 torch_layer_name = ["mlp_fc1", "mlp_fc2", "self_attn_q_proj", "self_attn_k_proj", "self_attn_v_proj", "self_attn_out_proj"]
-
+text_encode_file_path = "./text_encode_weight_bias.safetensors"
 
 def load_lora_file_weight(lora_file_dir, lora_file_list):
     lora_state_dict_list = []
@@ -51,9 +51,18 @@ def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
         text_encode_lora_weight.append(ops_lora_weight)    
     return text_encode_lora_weight
 
-def get_text_encode_weight_bias():
-    file_path = "./text_encode_weight_bias.safetensors"
-    with open(file_path, "rb") as f:
+def save_text_encode_weight_bias(pipeline, file_name):
+    text_encode_weight_bias = {}
+    for name, op in pipeline.text_encoder.named_sublayers():
+        if "linear" in name or "self_attn" in name:
+            text_encode_weight_bias[name + '.weight'] = op.weight
+            text_encode_weight_bias[name + '.bias'] = op.bias
+    save_file(text_encode_weight_bias, file_name)
+
+
+
+def get_text_encode_weight_bias(text_encode_file_path):
+    with open(text_encode_file_path, "rb") as f:
         data = f.read()
     text_encode_weight_bias = numpy_load(data)
     return text_encode_weight_bias
@@ -145,15 +154,18 @@ def save_mode(pipeline, path="./"):
 def run():
     lora_state_dict_list = load_lora_file_weight(lora_file_dir, lora_file_list)
     text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
-    text_encode_weight_bias = get_text_encode_weight_bias()
     pipeline = get_pipeline(model_path)
-    pipeline.text_encoder.load_weight_bias(text_encode_weight_bias)
+    # text_encode_weight_bias = get_text_encode_weight_bias(text_encode_file_path)
+    save_text_encode_weight_bias(pipeline, text_encode_file_path)
 
-    lora_idx_list = [0, 3]
-    lora_alpha_list = [0.5, 0.375]
-    text_encode_add_lora_weight = add_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
-    inference(pipeline, text_encode_add_lora_weight)
-    save_mode(pipeline)
+
+    # pipeline.text_encoder.load_weight_bias(text_encode_weight_bias)
+
+    # lora_idx_list = [0, 3]
+    # lora_alpha_list = [0.5, 0.375]
+    # text_encode_add_lora_weight = add_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
+    # inference(pipeline, text_encode_add_lora_weight)
+    # save_mode(pipeline)
 
 if __name__ == "__main__":
     paddle.set_device(f"gpu:1")
