@@ -20,7 +20,7 @@ from typing import Any, Optional, Tuple, Union
 
 import paddle
 import paddle.nn.functional as F
-from paddle import nn
+from paddle import nn, tensor
 
 from ...utils.initializer import normal_, ones_, zeros_
 from ..model_outputs import BaseModelOutputWithPooling, ModelOutput
@@ -558,7 +558,6 @@ class CLIPTextTransformer(nn.Layer):
         else:
             attention_mask = causal_mask
         attention_mask.stop_gradient = True
-
         encoder_outputs = self.transformer(
             embedding_output,
             src_mask=attention_mask,
@@ -590,21 +589,275 @@ class CLIPTextTransformer(nn.Layer):
             attentions=encoder_outputs.attentions,
         )
 
+def _convert_attention_mask(attn_mask, dtype):
+    """
+    Convert the attention mask to the target dtype we expect.
+    Parameters:
+        attn_mask (Tensor, optional): A tensor used in multi-head attention
+                to prevents attention to some unwanted positions, usually the
+                paddings or the subsequent positions. It is a tensor with shape
+                broadcasted to `[batch_size, n_head, sequence_length, sequence_length]`.
+                When the data type is bool, the unwanted positions have `False` 
+                values and the others have `True` values. When the data type is 
+                int, the unwanted positions have 0 values and the others have 1 
+                values. When the data type is float, the unwanted positions have 
+                `-INF` values and the others have 0 values. It can be None when 
+                nothing wanted or needed to be prevented attention to. Default None.
+        dtype (VarType): The target type of `attn_mask` we expect.
+    Returns:
+        Tensor: A Tensor with shape same as input `attn_mask`, with data type `dtype`.
+    """
+    if attn_mask is not None and attn_mask.dtype != dtype:
+        attn_mask_dtype = convert_dtype(attn_mask.dtype)
+        if attn_mask_dtype == 'bool' or 'int' in attn_mask_dtype:
+            attn_mask = (paddle.cast(attn_mask, dtype) - 1.0) * 1e9
+        else:
+            attn_mask = paddle.cast(attn_mask, dtype)
+    return attn_mask
 
-class LoraCLIPTextTransformer(CLIPTextTransformer):
+class LoraMultiHeadAttention(nn.MultiHeadAttention):
+    def __init__(self,
+            embed_dim,
+            num_heads,
+            dropout=0.,
+            kdim=None,
+            vdim=None,
+            need_weights=False,
+            weight_attr=None,
+            bias_attr=None):
+        super().__init__(
+            embed_dim,
+            num_heads,
+            dropout,
+            kdim,
+            vdim,
+            need_weights,
+            weight_attr,
+            bias_attr)
+    def _prepare_qkv(self, query, key, value, lora_weight, cache=None):
+        q = self.q_proj(query, lora_weight[2])
+        q = tensor.reshape(x=q, shape=[0, 0, self.num_heads, self.head_dim])
+        q = tensor.transpose(x=q, perm=[0, 2, 1, 3])
+
+        if isinstance(cache, self.StaticCache):
+            # for encoder-decoder attention in inference and has cached
+            k, v = cache.k, cache.v
+        else:
+            k, v = self.compute_kv(key, value, lora_weight)
+
+        if isinstance(cache, self.Cache):
+            # for decoder self-attention in inference
+            k = tensor.concat([cache.k, k], axis=2)
+            v = tensor.concat([cache.v, v], axis=2)
+            cache = self.Cache(k, v)
+
+        return (q, k, v) if cache is None else (q, k, v, cache)
+
+    def compute_kv(self, key, value, lora_weight):
+        k = self.k_proj(key, lora_weight[3])
+        v = self.v_proj(value, lora_weight[4])
+        k = tensor.reshape(x=k, shape=[0, 0, self.num_heads, self.head_dim])
+        k = tensor.transpose(x=k, perm=[0, 2, 1, 3])
+        v = tensor.reshape(x=v, shape=[0, 0, self.num_heads, self.head_dim])
+        v = tensor.transpose(x=v, perm=[0, 2, 1, 3])
+        return k, v
+
+    def forward(self, query, key=None, value=None, lora_weight=None, attn_mask=None, cache=None):
+        key = query if key is None else key
+        value = query if value is None else value
+        # compute q ,k ,v
+        if cache is None:
+            q, k, v = self._prepare_qkv(query, key, value, lora_weight, cache)
+        else:
+            q, k, v, cache = self._prepare_qkv(query, key, value, cache)
+
+        # scale dot product attention
+        product = paddle.matmul(x=q * (self.head_dim**-0.5),
+                                y=k,
+                                transpose_y=True)
+        if attn_mask is not None:
+            # Support bool or int mask
+            attn_mask = _convert_attention_mask(attn_mask, product.dtype)
+            product = product + attn_mask
+        weights = F.softmax(product)
+        if self.dropout:
+            weights = F.dropout(weights,
+                                self.dropout,
+                                training=self.training,
+                                mode="upscale_in_train")
+
+        out = tensor.matmul(weights, v)
+
+        # combine heads
+        out = tensor.transpose(out, perm=[0, 2, 1, 3])
+        out = tensor.reshape(x=out, shape=[0, 0, out.shape[2] * out.shape[3]])
+
+        # project to output
+        out = self.out_proj(out, lora_weight[5])
+
+        outs = [out]
+        if self.need_weights:
+            outs.append(weights)
+        if cache is not None:
+            outs.append(cache)
+        return out if len(outs) == 1 else tuple(outs)
+
+class LoraLinear(nn.Layer):
+    def __init__(self, weight, bias):
+        super().__init__()
+        self.weight = weight
+        self.bias = bias
+    def forward(self, x, lora_weight):
+        out = paddle.mm(x, self.weight + lora_weight) + self.bias
+        return out
+
+class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
+    def __init__(self,
+            d_model,
+            nhead,
+            dim_feedforward,
+            dropout=0.1,
+            activation="relu",
+            attn_dropout=None,
+            act_dropout=None,
+            normalize_before=False,
+            weight_attr=None,
+            bias_attr=None):
+        super().__init__(
+            d_model, 
+            nhead, 
+            dim_feedforward, 
+            dropout, 
+            activation,
+            attn_dropout,
+            act_dropout,
+            normalize_before,
+            weight_attr,
+            bias_attr)
+        self.self_attn = LoraMultiHeadAttention(
+            d_model,
+            nhead,
+            dropout=attn_dropout,
+            weight_attr=weight_attr,
+            bias_attr=bias_attr)
+
+    def forward(self, src, lora_weight=None, src_mask=None, cache=None):
+        src_mask = _convert_attention_mask(src_mask, src.dtype)
+
+        residual = src
+        if self.normalize_before:
+            src = self.norm1(src)
+        # Add cache for encoder for the usage like UniLM
+        if cache is None:
+            src = self.self_attn(src, src, src, lora_weight, src_mask)
+        else:
+            src, incremental_cache = self.self_attn(src, src, src, lora_weight, src_mask, cache)
+
+        src = residual + self.dropout1(src)
+        if not self.normalize_before:
+            src = self.norm1(src)
+
+        residual = src
+        if self.normalize_before:
+            src = self.norm2(src)
+        src = self.linear2(self.dropout(self.activation(self.linear1(src, lora_weight[0]))), lora_weight[1])
+        src = residual + self.dropout2(src)
+        if not self.normalize_before:
+            src = self.norm2(src)
+        return src if cache is None else (src, incremental_cache)
+
+
+class LoraTransformerEncoder(nn.TransformerEncoder):
+    def __init__(self, encoder_layer, num_layers, norm=None):
+        super().__init__(encoder_layer, num_layers, norm)
+
+    def load_weight_bias(self, weight_bias):
+        index = 0
+        for layer in self.layers:
+            layer.linear1 = LoraLinear(
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear1.weight"]), 
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear1.bias"])
+            )
+            layer.linear2 = LoraLinear(
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear2.weight"]), 
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear2.bias"])
+            )
+            layer.self_attn.q_proj = LoraLinear(
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.q_proj.weight"]), 
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.q_proj.bias"])
+            )
+            layer.self_attn.k_proj = LoraLinear(
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.k_proj.weight"]), 
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.k_proj.bias"])
+            )
+            layer.self_attn.v_proj = LoraLinear(
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.v_proj.weight"]), 
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.v_proj.bias"])
+            )
+            layer.self_attn.out_proj = LoraLinear(
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.out_proj.weight"]), 
+                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.out_proj.bias"])
+            )
+            index += 1
+
+    def forward(self, src, 
+            lora_weight,
+            src_mask=None, 
+            cache=None, 
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None):
+        src_mask = _convert_attention_mask(src_mask, src.dtype)
+        output = src
+        new_caches = []
+        for i, mod in enumerate(self.layers):
+            if cache is None:
+                output = mod(output, lora_weight=lora_weight[i], src_mask=src_mask)
+            else:
+                output, new_cache = mod(output,
+                                        lora_weight==lora_weight[i],
+                                        src_mask=src_mask,
+                                        cache=cache[i])
+                new_caches.append(new_cache)
+
+        if self.norm is not None:
+            output = self.norm(output)
+
+        return output if cache is None else (output, new_caches)
+
+class LoraCLIPTextTransformer(nn.Layer):
     def __init__(self, config: CLIPTextConfig):
-        super().__init__(config)
+        super().__init__()
+        self.config = config
+        embed_dim = config.hidden_size
+        self.token_embedding = nn.Embedding(config.vocab_size, embed_dim)
+        self.positional_embedding = nn.Embedding(config.max_position_embeddings, embed_dim)
 
-    def load_lora_weight(self, weight: dict):
-        self.lora_weight = weight
+        encoder_layer = LoraTransformerEncoderLayer(
+            d_model=config.hidden_size,
+            nhead=config.num_attention_heads,
+            dim_feedforward=config.intermediate_size,
+            normalize_before=True,
+            dropout=0.0,
+            activation=config.hidden_act,
+            attn_dropout=config.attention_dropout,
+            act_dropout=0.0,
+        )
+        self.transformer = LoraTransformerEncoder(encoder_layer, config.num_hidden_layers)
+        self.ln_final = nn.LayerNorm(embed_dim)
 
-    def update_lora_weight(self, lora_idx_list: list, lora_alpha_list: list):
-        for name, op in self.transformer.named_sublayers():
-            if name in self.lora_weight:
-                new_weight = op.weight
-                for idx, alppha in zip(lora_idx_list, lora_alpha_list):
-                    new_weight += alppha * self.lora_weight[name][idx].T
-                op.weight.set_value(new_weight)      
+        self.register_buffer(
+            "causal_mask",
+            paddle.triu(
+                paddle.ones((1, 1, config.max_position_embeddings, config.max_position_embeddings)) * NEG_INF,
+                diagonal=1,
+            ),
+            persistable=False,
+        )
+        self.register_buffer("position_ids", paddle.arange(config.max_position_embeddings).reshape((1, -1)))
+
+    def load_weight_bias(self, weight_bias):
+        self.transformer.load_weight_bias(weight_bias)
 
     def forward(
         self,
@@ -614,8 +867,7 @@ class LoraCLIPTextTransformer(CLIPTextTransformer):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        lora_idx_list: list = None,
-        lora_alpha_list: list = None,
+        lora_weight: dict = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         r"""
         Args:
@@ -639,7 +891,6 @@ class LoraCLIPTextTransformer(CLIPTextTransformer):
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`BaseModelOutputWithPooling`] instead of a plain tuple.
         """
-        self.update_lora_weight(lora_idx_list, lora_alpha_list)
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -666,10 +917,11 @@ class LoraCLIPTextTransformer(CLIPTextTransformer):
 
         encoder_outputs = self.transformer(
             embedding_output,
+            lora_weight=lora_weight,
             src_mask=attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            return_dict=return_dict
         )
 
         if isinstance(encoder_outputs, type(embedding_output)):
@@ -717,11 +969,10 @@ class CLIPTextModel(CLIPPretrainedModel):
         
         super().__init__(config)
         self.text_model = LoraCLIPTextTransformer(config)
-
         self.init_weights()
 
-    def load_lora_weight(self, weight: dict):
-        self.text_model.load_lora_weight(weight)
+    def load_weight_bias(self, weight_bias):
+        self.text_model.load_weight_bias(weight_bias)
 
     def get_input_embeddings(self) -> nn.Layer:
         return self.text_model.token_embedding
@@ -732,8 +983,7 @@ class CLIPTextModel(CLIPPretrainedModel):
     def forward(
         self,
         input_ids: Optional[paddle.Tensor] = None,
-        lora_idx_list: list = None,
-        lora_alpha_list: list = None,
+        lora_weight: dict = None,
         attention_mask: Optional[paddle.Tensor] = None,
         position_ids: Optional[paddle.Tensor] = None,
         output_attentions: Optional[bool] = None,
@@ -790,8 +1040,7 @@ class CLIPTextModel(CLIPPretrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            lora_idx_list=lora_idx_list,
-            lora_alpha_list=lora_alpha_list
+            lora_weight=lora_weight
         )
 
 

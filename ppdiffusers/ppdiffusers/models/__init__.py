@@ -30,4 +30,3 @@ if is_paddle_available():
     from .unet_2d_condition import UNet2DConditionModel
     from .unet_3d_condition import UNet3DConditionModel
     from .vq_model import VQModel
-    from .text_encode import LoraCLIPTextModel

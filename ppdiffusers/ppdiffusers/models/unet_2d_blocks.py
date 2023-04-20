@@ -527,7 +527,8 @@ class UNetMidBlock2DCrossAttn(nn.Layer):
             )
         ]
         attentions = []
-
+        print("UNetMidBlock2DCrossAttn #########")
+        print("dual_cross_attention ##### ", num_layers)
         for _ in range(num_layers):
             if not dual_cross_attention:
                 attentions.append(

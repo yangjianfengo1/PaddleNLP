@@ -22,7 +22,7 @@ from packaging import version
 from paddlenlp.transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 from ...configuration_utils import FrozenDict
-from ...models import AutoencoderKL, UNet2DConditionModel, LoraCLIPTextModel
+from ...models import AutoencoderKL, UNet2DConditionModel
 from ...schedulers import KarrasDiffusionSchedulers
 from ...utils import deprecate, logging, randn_tensor, replace_example_docstring
 from ..pipeline_utils import DiffusionPipeline
@@ -168,9 +168,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         prompt,
         num_images_per_prompt,
         do_classifier_free_guidance,
-        negative_prompt=None,
-        lora_idx_list=None,
-        lora_alpha_list=None,
+        negative_prompt = None,
+        lora_weight = None,
         prompt_embeds: Optional[paddle.Tensor] = None,
         negative_prompt_embeds: Optional[paddle.Tensor] = None,
     ):
@@ -233,8 +232,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             prompt_embeds = self.text_encoder(
                 text_input_ids,
                 attention_mask=attention_mask,
-                lora_idx_list=lora_idx_list,
-                lora_alpha_list=lora_alpha_list
+                lora_weight=lora_weight
             )
             prompt_embeds = prompt_embeds[0]
 
@@ -282,9 +280,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
             negative_prompt_embeds = self.text_encoder(
                 uncond_input.input_ids,
-                lora_idx_list=lora_idx_list,
-                lora_alpha_list=lora_alpha_list,
                 attention_mask=attention_mask,
+                lora_weight=lora_weight
             )
             negative_prompt_embeds = negative_prompt_embeds[0]
 
@@ -409,8 +406,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
-        lora_idx_list: List[int] = None,
-        lora_alpha_list: List[float] = None,
+        lora_weight: dict = None,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -520,8 +516,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             num_images_per_prompt,
             do_classifier_free_guidance,
             negative_prompt,
-            lora_idx_list = lora_idx_list,
-            lora_alpha_list = lora_alpha_list,
+            lora_weight = lora_weight,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
         )
@@ -558,8 +553,6 @@ class StableDiffusionPipeline(DiffusionPipeline):
                     latent_model_input,
                     t,
                     encoder_hidden_states=prompt_embeds,
-                    lora_idx_list = lora_idx_list,
-                    lora_alpha_list = lora_alpha_list,
                     cross_attention_kwargs=cross_attention_kwargs,
                 ).sample
 
