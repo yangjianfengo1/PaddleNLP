@@ -18,8 +18,13 @@ lora_file_dir = "/home/yangjianfeng01/apply_lora_diffusers/loras/"
 lora_file_list  = ["mecha.safetensors", "Chibi.safetensors", "Colorwater.safetensors", "MagazineCover.safetensors"]
 model_path = "./runwayml/stable-diffusion-v1-5"
 layers_num = 12
+up_block_num = 4
+up_atten_num = 3
+down_block_num = 4
+down_atten_num = 2
 torch_layer_name = ["mlp_fc1", "mlp_fc2", "self_attn_q_proj", "self_attn_k_proj", "self_attn_v_proj", "self_attn_out_proj"]
 text_encode_file_path = "./text_encode_weight_bias.safetensors"
+unet_file_path = "./unet_weight_bias.safetensors"
 
 def load_lora_file_weight(lora_file_dir, lora_file_list):
     lora_state_dict_list = []
@@ -33,15 +38,15 @@ def load_lora_file_weight(lora_file_dir, lora_file_list):
 
 def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
     text_encode_lora_weight = []
-    layer_name_layer_name = "lora_te_text_model_encoder_layers_"
+    layer_name = "lora_te_text_model_encoder_layers_"
     for i in range(layers_num):
         index = 0
         ops_lora_weight = []
         for torch_name in torch_layer_name:
             lora_weight_list = []
             for static_dict in lora_state_dict_list:
-                up_name = layer_name_layer_name + str(i) + "_" + torch_name + ".lora_up.weight"
-                down_name = layer_name_layer_name + str(i) + "_" + torch_name + ".lora_down.weight"
+                up_name = layer_name + str(i) + "_" + torch_name + ".lora_up.weight"
+                down_name = layer_name + str(i) + "_" + torch_name + ".lora_down.weight"
                 weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
                 weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
                 new_weight = paddle.mm(weight_up, weight_down)
@@ -54,57 +59,108 @@ def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
 def save_text_encode_weight_bias(pipeline, file_name):
     text_encode_weight_bias = {}
     for name, op in pipeline.text_encoder.named_sublayers():
-        if "linear" in name or "self_attn" in name:
-            text_encode_weight_bias[name + '.weight'] = op.weight
-            text_encode_weight_bias[name + '.bias'] = op.bias
+        if "linear" in name or "self_attn." in name:
+            text_encode_weight_bias[name + '.weight'] = op.weight.numpy()
+            text_encode_weight_bias[name + '.bias'] = op.bias.numpy()
     save_file(text_encode_weight_bias, file_name)
 
+def save_unet_encode_weight_bias(pipeline, unet_file_path):
+    unet_weight_bias = {}
+    for name, op in pipeline.unet.named_sublayers():
+        if ("attn" in name and "to" in name and hasattr(op, "weight")) or "proj_" in name or "ff.net.0." in name or "ff.net.2" in name:
+            unet_weight_bias[name + '.weight'] = op.weight.numpy()
+            if op.bias is not None:
+                unet_weight_bias[name + '.bias'] = op.bias.numpy()
+    save_file(unet_weight_bias, unet_file_path)
 
 
-def get_text_encode_weight_bias(text_encode_file_path):
-    with open(text_encode_file_path, "rb") as f:
+def get_weight_bias(file_path):
+    with open(file_path, "rb") as f:
         data = f.read()
-    text_encode_weight_bias = numpy_load(data)
-    return text_encode_weight_bias
+    weight_bias = numpy_load(data)
+    return weight_bias
+
+def append_unet_blocks_lora_weight(unet_lora_weight, op_names, is_transform, 
+        lora_state_dict_list, layer_name, block, atten, dtype=paddle.float32):
+    if is_transform:
+        transformer_name = "_transformer_blocks_0_"
+    else:
+        transformer_name = "_"
+    for op in op_names:
+        lora_weight_list = []
+        for static_dict in lora_state_dict_list:
+            up_name = layer_name + str(block) + "_attentions_" + str(atten) + transformer_name + op + ".lora_up.weight"
+            down_name = up_name.replace("lora_up", "lora_down")
+            weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
+            weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
+            
+            if (len(weight_up.shape) == 4):
+                weight_up = weight_up.squeeze()
+                weight_down = weight_down.squeeze()
+            new_weight = paddle.mm(weight_up, weight_down)
+            lora_weight_list.append(new_weight.T)
+        unet_lora_weight.append(lora_weight_list)
+
+def append_unet_block_lora_weight(unet_lora_weight, op_names,
+        lora_state_dict_list, layer_name, dtype=paddle.float32):
+    for op in op_names:
+        lora_weight_list = []
+        for static_dict in lora_state_dict_list:
+            up_name = layer_name + op + ".lora_up.weight"
+            down_name = up_name.replace("lora_up", "lora_down")
+            weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
+            weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
+            if (len(weight_up.shape) == 4):
+                weight_up = weight_up.squeeze()
+                weight_down = weight_down.squeeze()
+            new_weight = paddle.mm(weight_up, weight_down)
+            lora_weight_list.append(new_weight.T)
+        unet_lora_weight.append(lora_weight_list)
+
 
 def get_unet_lora_weight(lora_state_dict_list, dtype=paddle.float32):
-    unet_lora_weight = {}
-    name_map = [
-        ("_", "."),
-        ("up.blocks", "up_blocks"),
-        ("mid.blocks", "mid_blocks"),
-        ("down.blocks", "down_blocks"),
-        ("transformer.blocks", "transformer_blocks"),
-        ("proj.in", "proj_in"),
+    unet_lora_weight = []
+    op_names1 = [
+        "attn1_to_q", "attn1_to_k", "attn1_to_v", "attn1_to_out_0",
+        "attn2_to_q", "attn2_to_k", "attn2_to_v", "attn2_to_out_0",
+        "ff_net_0_proj", "ff_net_2"
     ]
-    for static_dict in lora_state_dict_list:
-        for key in static_dict:
-            if ".alpha" in key:
-                continue
-            if "lora_unet" in key:
-                if "lora_down" in key:
-                    down_name = key 
-                    up_name = key.replace("lora_down", "lora_up")
-                else:
-                    up_name = key 
-                    down_name = key.replace("lora_up", "lora_down")
-                if len(static_dict[up_name].shape) == 4:
-                    weight_up = paddle.to_tensor(static_dict[up_name].squeeze(3).squeeze(2)).astype(dtype)
-                    weight_down = paddle.to_tensor(static_dict[down_name].squeeze(3).squeeze(2)).astype(dtype)
-                    new_weight = paddle.mm(weight_up, weight_down).unsqueeze(2).unsqueeze(3)
-                else:
-                    weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
-                    weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
-                    new_weight = paddle.mm(weight_up, weight_down)
-                paddle_weight_name = key.replace("lora_unet_", "")
-                paddle_weight_name = paddle_weight_name.replace(".lora_down.weight", "")
-                paddle_weight_name = paddle_weight_name.replace(".lora_up.weight", "")
-                for torch_name, paddle_name in name_map:
-                    paddle_weight_name = paddle_weight_name.replace(torch_name, paddle_name)
-                if (paddle_weight_name in unet_lora_weight):
-                    unet_lora_weight[paddle_weight_name].append(new_weight)
-                else:
-                    unet_lora_weight[paddle_weight_name] = [new_weight]
+    op_names2 = [
+        "proj_in", "proj_out"
+    ]
+    layer_name = "lora_unet_up_blocks_"
+    for block in range(1, up_block_num):
+        block_weight = []
+        for atten in range(up_atten_num):
+            atten_weight = []
+            append_unet_blocks_lora_weight(atten_weight, op_names1, True, 
+                    lora_state_dict_list, layer_name, block, atten)
+            append_unet_blocks_lora_weight(atten_weight, op_names2, False, 
+                    lora_state_dict_list, layer_name, block, atten)
+            block_weight.append(atten_weight)
+        unet_lora_weight.append(block_weight)
+
+    mid_weight = []
+    layer_name = "lora_unet_mid_block_attentions_0_transformer_blocks_0_"     
+    append_unet_block_lora_weight(mid_weight, op_names1,
+        lora_state_dict_list, layer_name)
+    
+    layer_name = "lora_unet_up_blocks_1_attentions_0_"     
+    append_unet_block_lora_weight(mid_weight, op_names2,
+        lora_state_dict_list, layer_name)
+    
+    unet_lora_weight.append([mid_weight])
+    layer_name = "lora_unet_down_blocks_"
+    for block in range(0, down_block_num - 1):
+        block_weight = []
+        for atten in range(down_atten_num):
+            atten_weight = []
+            append_unet_blocks_lora_weight(atten_weight, op_names1, True, 
+                    lora_state_dict_list, layer_name, block, atten)
+            append_unet_blocks_lora_weight(atten_weight, op_names2, False, 
+                    lora_state_dict_list, layer_name, block, atten)
+            block_weight.append(atten_weight)
+        unet_lora_weight.append(block_weight)
     return unet_lora_weight
 
 
@@ -115,23 +171,41 @@ def get_pipeline(model_path):
     )
     return pipeline
 
-def add_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list):
-    text_encode_add_lora_weight = []
+def add_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
+    res_lora_weight = []
     length = len(lora_idx_list)
-    for layer in text_encode_lora_weight:
+    for layer in lora_weight:
         layer_weight = []
         for sub_op in layer:
             lora_weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
             for i in range(length - 1):
                 lora_weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]
             layer_weight.append(lora_weight)
-        text_encode_add_lora_weight.append(layer_weight)
-    return text_encode_add_lora_weight
+        res_lora_weight.append(layer_weight)
+    return res_lora_weight
 
-def inference(pipeline, text_encode_add_lora_weight):
+def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
+    res_lora_weight = []
+    length = len(lora_idx_list)
+    for block in lora_weight:
+        atten_weight = []
+        for atten in block:
+            op_lora_weight = []
+            for sub_op in  atten:
+                lora_weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
+                for i in range(length - 1):
+                    lora_weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]
+                op_lora_weight.append(lora_weight)
+            atten_weight.append(op_lora_weight)
+        res_lora_weight.append(atten_weight)
+    return res_lora_weight
+
+
+def inference(pipeline, text_encode_lora_weight, unet_lora_weight):
     image = pipeline(
             prompt="masterpiece, best quality, 1 girl, mecha", 
-            lora_weight = text_encode_add_lora_weight,
+            text_encode_lora_weight = text_encode_lora_weight,
+            unet_lora_weight = unet_lora_weight,
             negative_prompt="worst quality, low quality, nsfw", 
             guidance_scale=5.0, 
             num_inference_steps=20).images[0]
@@ -150,22 +224,49 @@ def save_mode(pipeline, path="./"):
     save_path = os.path.join(path, "text_encoder", "inference")
     paddle.jit.save(text_encoder, save_path)
 
+    cross_attention_dim = pipeline.unet.config.cross_attention_dim  # 768 or 1024 or 1280
+    unet_channels = pipeline.unet.config.in_channels  # 4 or 9
+    latent_height = 512 // 8
+    latent_width = 512 // 8
+    unet = paddle.jit.to_static(
+        pipeline.unet,
+        input_spec=[
+            paddle.static.InputSpec(
+                shape=[None, unet_channels, latent_height, latent_width], dtype="float32", name="sample"
+            ),  # sample
+            paddle.static.InputSpec(shape=[1], dtype="float32", name="timestep"),  # timestep
+            paddle.static.InputSpec(
+                shape=[None, None, cross_attention_dim], dtype="float32", name="encoder_hidden_states"
+            ),  # encoder_hidden_states
+            paddle.static.InputSpec(
+                shape=[7, None, 12, None, None], dtype="float32", name="lora_weight"
+            ) 
+        ],
+    )
+    
+    save_path = os.path.join(path, "unet", "inference")
+    paddle.jit.save(unet, save_path)
+
+
 
 def run():
     lora_state_dict_list = load_lora_file_weight(lora_file_dir, lora_file_list)
     text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
+    unet_lora_weight = get_unet_lora_weight(lora_state_dict_list)
+    
     pipeline = get_pipeline(model_path)
-    # text_encode_weight_bias = get_text_encode_weight_bias(text_encode_file_path)
-    save_text_encode_weight_bias(pipeline, text_encode_file_path)
+    #save_text_encode_weight_bias(pipeline, text_encode_file_path)
+    #save_unet_encode_weight_bias(pipeline, unet_file_path)
+    
+    pipeline.text_encoder.load_weight_bias(get_weight_bias(text_encode_file_path))
+    pipeline.unet.load_weight_bias(get_weight_bias(unet_file_path))
+    lora_idx_list = [0, 3]
+    lora_alpha_list = [0.5, 0.375]
+    text_encode_lora_weight = add_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
 
-
-    # pipeline.text_encoder.load_weight_bias(text_encode_weight_bias)
-
-    # lora_idx_list = [0, 3]
-    # lora_alpha_list = [0.5, 0.375]
-    # text_encode_add_lora_weight = add_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
-    # inference(pipeline, text_encode_add_lora_weight)
-    # save_mode(pipeline)
+    unet_lora_weight = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
+    inference(pipeline, text_encode_lora_weight, unet_lora_weight)
+    save_mode(pipeline)
 
 if __name__ == "__main__":
     paddle.set_device(f"gpu:1")

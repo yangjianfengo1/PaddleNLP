@@ -266,6 +266,7 @@ class BasicTransformerBlock(nn.Layer):
     def forward(
         self,
         hidden_states,
+        lora_weight,
         encoder_hidden_states=None,
         timestep=None,
         attention_mask=None,
@@ -287,6 +288,7 @@ class BasicTransformerBlock(nn.Layer):
             norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
             attention_mask=attention_mask,
+            lora_weight=lora_weight[0:4],
             **cross_attention_kwargs,
         )
         if self.use_ada_layer_norm_zero:
@@ -303,6 +305,7 @@ class BasicTransformerBlock(nn.Layer):
                 norm_hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
+                lora_weight=lora_weight[4:8],
                 **cross_attention_kwargs,
             )
             hidden_states = attn_output + hidden_states
@@ -313,7 +316,7 @@ class BasicTransformerBlock(nn.Layer):
         if self.use_ada_layer_norm_zero:
             norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
 
-        ff_output = self.ff(norm_hidden_states)
+        ff_output = self.ff(norm_hidden_states, lora_weight=lora_weight[8:10])
 
         if self.use_ada_layer_norm_zero:
             ff_output = gate_mlp.unsqueeze(1) * ff_output
@@ -369,9 +372,10 @@ class FeedForward(nn.Layer):
         if final_dropout:
             self.net.append(nn.Dropout(dropout))
 
-    def forward(self, hidden_states):
-        for module in self.net:
-            hidden_states = module(hidden_states)
+    def forward(self, hidden_states, lora_weight):
+        hidden_states = self.net[0](hidden_states, lora_weight=lora_weight[0])
+        hidden_states = self.net[1](hidden_states)
+        hidden_states = self.net[2](hidden_states, lora_weight=lora_weight[1])
         return hidden_states
 
 
@@ -405,8 +409,8 @@ class GEGLU(nn.Layer):
         super().__init__()
         self.proj = nn.Linear(dim_in, dim_out * 2)
 
-    def forward(self, hidden_states):
-        hidden_states, gate = self.proj(hidden_states).chunk(2, axis=-1)
+    def forward(self, hidden_states, lora_weight):
+        hidden_states, gate = self.proj(hidden_states, lora_weight).chunk(2, axis=-1)
         return hidden_states * F.gelu(gate)
 
 

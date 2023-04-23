@@ -406,7 +406,8 @@ class StableDiffusionPipeline(DiffusionPipeline):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
-        lora_weight: dict = None,
+        text_encode_lora_weight: List = None,
+        unet_lora_weight: List = None,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
@@ -516,7 +517,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
             num_images_per_prompt,
             do_classifier_free_guidance,
             negative_prompt,
-            lora_weight = lora_weight,
+            lora_weight = text_encode_lora_weight,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
         )
@@ -552,6 +553,7 @@ class StableDiffusionPipeline(DiffusionPipeline):
                 noise_pred = self.unet(
                     latent_model_input,
                     t,
+                    lora_weight=unet_lora_weight,
                     encoder_hidden_states=prompt_embeds,
                     cross_attention_kwargs=cross_attention_kwargs,
                 ).sample

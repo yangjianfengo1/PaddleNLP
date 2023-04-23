@@ -183,7 +183,7 @@ class CrossAttention(nn.Layer):
 
         self.processor = processor
 
-    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, **cross_attention_kwargs):
+    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, lora_weight=None, **cross_attention_kwargs):
         # The `CrossAttention` class can call different attention processors / attention functions
         # here we simply pass along all tensors to the selected processor class
         # For standard processors that are defined here, `**cross_attention_kwargs` is empty
@@ -192,6 +192,7 @@ class CrossAttention(nn.Layer):
             hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             attention_mask=attention_mask,
+            lora_weight=lora_weight,
             **cross_attention_kwargs,
         )
 
@@ -268,18 +269,19 @@ class CrossAttnProcessor:
         hidden_states,
         encoder_hidden_states=None,
         attention_mask=None,
+        lora_weight=None,
     ):
         batch_size, sequence_length, _ = hidden_states.shape
         attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
-        query = attn.to_q(hidden_states)
+        query = attn.to_q(hidden_states, lora_weight[0])
 
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
         elif attn.cross_attention_norm:
             encoder_hidden_states = attn.norm_cross(encoder_hidden_states)
 
-        key = attn.to_k(encoder_hidden_states)
-        value = attn.to_v(encoder_hidden_states)
+        key = attn.to_k(encoder_hidden_states, lora_weight[1])
+        value = attn.to_v(encoder_hidden_states, lora_weight[2])
 
         query = attn.head_to_batch_dim(query)
         key = attn.head_to_batch_dim(key)
@@ -290,7 +292,7 @@ class CrossAttnProcessor:
         hidden_states = attn.batch_to_head_dim(hidden_states)
 
         # linear proj
-        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[0](hidden_states, lora_weight[3])
         # dropout
         hidden_states = attn.to_out[1](hidden_states)
 

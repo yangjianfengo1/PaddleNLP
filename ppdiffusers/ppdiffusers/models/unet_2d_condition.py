@@ -498,23 +498,67 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D, CrossAttnUpBlock2D, UpBlock2D)):
             module.gradient_checkpointing = value
 
-    # def update_block_weight(self, lora_idx_list: List[int], lora_alpha_list: List[float], block_profix: str, blocks):
-    #     for name, op in blocks.named_sublayers():
-    #         name = block_profix + name
-    #         if name in self.lora_weight:
-    #             new_weight = op.weight
-    #             if op.weight.shape == self.lora_weight[name][0].shape:
-    #                 for idx, alppha in zip(lora_idx_list, lora_alpha_list):
-    #                     new_weight += alppha * self.lora_weight[name][idx]
-    #             else:
-    #                 for idx, alppha in zip(lora_idx_list, lora_alpha_list):
-    #                     new_weight += alppha * self.lora_weight[name][idx].T
-    #             op.weight.set_value(new_weight)
+    def load_weight_bias(self, weight_bias):
+        op_names1 = [
+            "attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0",
+            "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0",
+            "ff.net.0.proj", "ff.net.2"
+        ]
+        op_names2 = [
+            "proj_in", "proj_out"
+        ]
+        
+        for block in range(1, len(self.up_blocks)):
+            for atten in range(3):
+                up_weight_bias = {}
+                for op in op_names1:
+                    name = "up_blocks." + str(block) + ".attentions." + str(atten) + ".transformer_blocks.0." + op
+                    up_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
+                    if name + ".bias" in weight_bias:
+                        up_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
+
+                for op in op_names2:
+                    name = "up_blocks." + str(block) + ".attentions." + str(atten) + "." + op
+                    up_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
+                    if name + ".bias" in weight_bias:
+                        up_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
+                self.up_blocks[block].attentions[atten].load_weight_bias(up_weight_bias)
+
+        mid_weight_bias = {}
+        for op in op_names1:
+            name = "mid_block.attentions.0.transformer_blocks.0." + op
+            mid_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
+            if name + ".bias" in weight_bias:
+                mid_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
+
+        for op in op_names2:
+            name = "mid_block.attentions.0." + op
+            mid_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
+            if name + ".bias" in weight_bias:
+                mid_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
+        self.mid_block.attentions[0].load_weight_bias(mid_weight_bias)
+
+        for block in range(len(self.down_blocks) - 1):
+            for atten in range(2):
+                down_weight_bias = {}
+                for op in op_names1:
+                    name = "down_blocks." + str(block) + ".attentions." + str(atten) + ".transformer_blocks.0." + op
+                    down_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
+                    if name + ".bias" in weight_bias:
+                        down_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
+
+                for op in op_names2:
+                    name = "down_blocks." + str(block) + ".attentions." + str(atten) + "." + op
+                    down_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
+                    if name + ".bias" in weight_bias:
+                        down_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
+                self.down_blocks[block].attentions[atten].load_weight_bias(down_weight_bias)
 
     def forward(
         self,
         sample: paddle.Tensor,
         timestep: Union[paddle.Tensor, float, int],
+        lora_weight: List,
         encoder_hidden_states: paddle.Tensor,
         class_labels: Optional[paddle.Tensor] = None,
         timestep_cond: Optional[paddle.Tensor] = None,
@@ -613,6 +657,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         # ! resnet_pre_temb_non_linearity
         down_nonlinear_temb = self.down_resnet_temb_nonlinearity(emb) if self.resnet_pre_temb_non_linearity else emb
 
+        index = 4
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
                 sample, res_samples = downsample_block(
@@ -621,7 +666,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
                     cross_attention_kwargs=cross_attention_kwargs,
+                    lora_weight=lora_weight[index]
                 )
+                index += 1
             else:
                 sample, res_samples = downsample_block(hidden_states=sample, temb=down_nonlinear_temb)
 
@@ -643,6 +690,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             sample = self.mid_block(
                 sample,
                 down_nonlinear_temb,
+                lora_weight=lora_weight[3],
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
                 cross_attention_kwargs=cross_attention_kwargs,
@@ -662,7 +710,6 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             # upsample size, we do it here
             if not is_final_block and forward_upsample_size:
                 upsample_size = down_block_res_samples[-1].shape[2:]
-
             if hasattr(upsample_block, "has_cross_attention") and upsample_block.has_cross_attention:
                 sample = upsample_block(
                     hidden_states=sample,
@@ -672,13 +719,14 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
+                    lora_weight=lora_weight[i - 1],
                 )
             else:
                 sample = upsample_block(
                     hidden_states=sample,
                     temb=down_nonlinear_temb,
                     res_hidden_states_tuple=res_samples,
-                    upsample_size=upsample_size,
+                    upsample_size=upsample_size
                 )
         # 6. post-process
         if self.conv_norm_out:
