@@ -121,6 +121,7 @@ class UNet2DConditionModel(metaclass=DummyObject):
     def from_pretrained(cls, *args, **kwargs):
         requires_backends(cls, ["paddle"])
 
+
 class UNet2DModel(metaclass=DummyObject):
     _backends = ["paddle"]
 
