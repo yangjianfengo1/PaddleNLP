@@ -573,8 +573,12 @@ class UNetMidBlock2DCrossAttn(nn.Layer):
 
     def forward(
         self, hidden_states, temb=None, encoder_hidden_states=None, 
-        attention_mask=None, cross_attention_kwargs=None, lora_weight=None,
+        attention_mask=None, cross_attention_kwargs=None, 
+        lora_weight=None,
+        unet_atten_slice_list = None,
+        unet_sub_op_slice_list = None,
     ):
+
         hidden_states = self.resnets[0](hidden_states, temb)
         index = 0
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
@@ -582,8 +586,8 @@ class UNetMidBlock2DCrossAttn(nn.Layer):
                 hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 cross_attention_kwargs=cross_attention_kwargs,
-                lora_weight=lora_weight[index],
-            
+                lora_weight = lora_weight,
+                unet_sub_op_slice_list = unet_sub_op_slice_list,
             ).sample
             hidden_states = resnet(hidden_states, temb)
             index += 1
@@ -859,7 +863,10 @@ class CrossAttnDownBlock2D(nn.Layer):
 
     def forward(
         self, hidden_states, temb=None, encoder_hidden_states=None, 
-        attention_mask=None, cross_attention_kwargs=None, lora_weight=None,
+        attention_mask=None, cross_attention_kwargs=None, 
+        lora_weight=None,
+        unet_atten_slice_list = None,
+        unet_sub_op_slice_list = None,
     ):
         # TODO(Patrick, William) - attention mask is not used
         output_states = ()
@@ -887,7 +894,8 @@ class CrossAttnDownBlock2D(nn.Layer):
                 hidden_states = resnet(hidden_states, temb)
                 hidden_states = attn(
                     hidden_states,
-                    lora_weight=lora_weight[index],
+                    lora_weight=lora_weight[unet_atten_slice_list[index]: unet_atten_slice_list[index + 1]],
+                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 13: (index + 1) * 13] - unet_atten_slice_list[index],
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
                 ).sample
@@ -1860,11 +1868,12 @@ class CrossAttnUpBlock2D(nn.Layer):
         cross_attention_kwargs=None,
         upsample_size=None,
         attention_mask=None,
-        lora_weight=None
+        lora_weight=None,
+        unet_atten_slice_list = None,
+        unet_sub_op_slice_list = None,
     ):
         index = 0
         # TODO(Patrick, William) - attention mask is not used
-        
         for resnet, attn in zip(self.resnets, self.attentions):
             # pop res hidden states
             res_hidden_states = res_hidden_states_tuple[-1]
@@ -1895,7 +1904,8 @@ class CrossAttnUpBlock2D(nn.Layer):
                     hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
-                    lora_weight=lora_weight[index],
+                    lora_weight=lora_weight[unet_atten_slice_list[index]: unet_atten_slice_list[index + 1]],
+                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 13: (index + 1) * 13] - unet_atten_slice_list[index],
                 ).sample
             index += 1
         if self.upsamplers is not None:

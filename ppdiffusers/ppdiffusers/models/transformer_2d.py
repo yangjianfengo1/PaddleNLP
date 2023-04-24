@@ -33,6 +33,7 @@ class LoraConvLinear(nn.Layer):
         self.bias = paddle.to_tensor(bias.reshape([1, self.weight.shape[1], 1]))
     def forward(self, x, lora_weight):
         input_shape = x.shape
+        lora_weight = lora_weight.reshape(self.weight.shape)
         weight = (self.weight + lora_weight).unsqueeze(0)
         weight = paddle.expand(weight, shape=[input_shape[0], weight.shape[1], weight.shape[2]])
         x = x.reshape([input_shape[0], input_shape[1], input_shape[2] * input_shape[3]])
@@ -46,6 +47,7 @@ class LoraLinearNoBias(nn.Layer):
         self.weight = paddle.to_tensor(weight)
 
     def forward(self, x, lora_weight):
+        lora_weight = lora_weight.reshape(self.weight.shape)
         out = paddle.mm(x, self.weight + lora_weight)
         return out
 
@@ -54,7 +56,9 @@ class LoraLinearBias(nn.Layer):
         super().__init__()
         self.weight = paddle.to_tensor(weight)
         self.bias = paddle.to_tensor(bias)
+
     def forward(self, x, lora_weight):
+        lora_weight = lora_weight.reshape(self.weight.shape)
         out = paddle.mm(x, self.weight + lora_weight) + self.bias
         return out
 
@@ -268,7 +272,8 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         class_labels=None,
         cross_attention_kwargs=None,
         return_dict: bool = True,
-        lora_weight=None
+        lora_weight = None,
+        unet_sub_op_slice_list = None,
     ):
         """
         Args:
@@ -298,10 +303,10 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
             residual = hidden_states
             hidden_states = self.norm(hidden_states)
             if not self.use_linear_projection:
-                hidden_states = self.proj_in(hidden_states, lora_weight[10])
+                hidden_states = self.proj_in(hidden_states, lora_weight[unet_sub_op_slice_list[10]: unet_sub_op_slice_list[11]])
             hidden_states = hidden_states.transpose([0, 2, 3, 1]).flatten(1, 2)
             if self.use_linear_projection:
-                hidden_states = self.proj_in(hidden_states, lora_weight[10])
+                hidden_states = self.proj_in(hidden_states, lora_weight[unet_sub_op_slice_list[10]: unet_sub_op_slice_list[11]])
         elif self.is_input_vectorized:
             hidden_states = self.latent_image_embedding(hidden_states.cast("int64"))
         elif self.is_input_patches:
@@ -311,20 +316,21 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
         for block in self.transformer_blocks:
             hidden_states = block(
                 hidden_states,
+                lora_weight=lora_weight[unet_sub_op_slice_list[0]: unet_sub_op_slice_list[10]],
+                unet_sub_op_slice_list = unet_sub_op_slice_list,
                 encoder_hidden_states=encoder_hidden_states,
                 timestep=timestep,
                 cross_attention_kwargs=cross_attention_kwargs,
                 class_labels=class_labels,
-                lora_weight=lora_weight[0:10]
             )
 
         # 3. Output
         if self.is_input_continuous:
             if self.use_linear_projection:
-                hidden_states = self.proj_out(hidden_states, lora_weight[11])
+                hidden_states = self.proj_out(hidden_states, lora_weight[unet_sub_op_slice_list[11]: unet_sub_op_slice_list[12]])
             hidden_states = hidden_states.reshape([-1, height, width, self.inner_dim]).transpose([0, 3, 1, 2])
             if not self.use_linear_projection:
-                hidden_states = self.proj_out(hidden_states, lora_weight[11])
+                hidden_states = self.proj_out(hidden_states, lora_weight[unet_sub_op_slice_list[11]: unet_sub_op_slice_list[12]])
             output = hidden_states + residual
         elif self.is_input_vectorized:
             hidden_states = self.norm_out(hidden_states)

@@ -558,8 +558,11 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         self,
         sample: paddle.Tensor,
         timestep: Union[paddle.Tensor, float, int],
-        lora_weight: List,
         encoder_hidden_states: paddle.Tensor,
+        lora_weight: paddle.Tensor,
+        unet_block_slice_list: paddle.Tensor,
+        unet_atten_slice_list: paddle.Tensor,
+        unet_sub_op_slice_list: paddle.Tensor,
         class_labels: Optional[paddle.Tensor] = None,
         timestep_cond: Optional[paddle.Tensor] = None,
         attention_mask: Optional[paddle.Tensor] = None,
@@ -657,7 +660,7 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         # ! resnet_pre_temb_non_linearity
         down_nonlinear_temb = self.down_resnet_temb_nonlinearity(emb) if self.resnet_pre_temb_non_linearity else emb
 
-        index = 4
+        index = 0
         for downsample_block in self.down_blocks:
             if hasattr(downsample_block, "has_cross_attention") and downsample_block.has_cross_attention:
                 sample, res_samples = downsample_block(
@@ -666,7 +669,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
                     cross_attention_kwargs=cross_attention_kwargs,
-                    lora_weight=lora_weight[index]
+                    lora_weight=lora_weight[unet_block_slice_list[index]: unet_block_slice_list[index + 1]],
+                    unet_atten_slice_list = unet_atten_slice_list[index * 3: (index + 1) * 3] - unet_block_slice_list[index],
+                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 26: (index + 1) * 26] - unet_block_slice_list[index],
                 )
                 index += 1
             else:
@@ -690,7 +695,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             sample = self.mid_block(
                 sample,
                 down_nonlinear_temb,
-                lora_weight=lora_weight[3],
+                lora_weight=lora_weight[unet_block_slice_list[3]: unet_block_slice_list[4]],
+                unet_atten_slice_list = unet_atten_slice_list[9: 11] - unet_block_slice_list[3],
+                unet_sub_op_slice_list = unet_sub_op_slice_list[78: 91] - unet_block_slice_list[3],
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
                 cross_attention_kwargs=cross_attention_kwargs,
@@ -719,7 +726,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
-                    lora_weight=lora_weight[i - 1],
+                    lora_weight=lora_weight[unet_block_slice_list[i + 3]: unet_block_slice_list[i + 4]],
+                    unet_atten_slice_list = unet_atten_slice_list[11+(i-1) * 4: 11 + i * 4] - unet_block_slice_list[i + 3],
+                    unet_sub_op_slice_list = unet_sub_op_slice_list[91 + (i - 1) * 39: 91 + i * 39] - unet_block_slice_list[i + 3],
                 )
             else:
                 sample = upsample_block(

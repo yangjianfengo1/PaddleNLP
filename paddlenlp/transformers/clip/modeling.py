@@ -709,8 +709,7 @@ class LoraLinear(nn.Layer):
         self.weight = paddle.to_tensor(weight)
         self.bias = paddle.to_tensor(bias)
     def forward(self, x, lora_weight):
-        out = self.weight + lora_weight
-        out = paddle.mm(x, out)
+        out = paddle.mm(x, self.weight + lora_weight) + self.bias
         return out
 
 class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):

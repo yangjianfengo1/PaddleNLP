@@ -266,7 +266,8 @@ class BasicTransformerBlock(nn.Layer):
     def forward(
         self,
         hidden_states,
-        lora_weight,
+        lora_weight=None,
+        unet_sub_op_slice_list = None,
         encoder_hidden_states=None,
         timestep=None,
         attention_mask=None,
@@ -288,7 +289,8 @@ class BasicTransformerBlock(nn.Layer):
             norm_hidden_states,
             encoder_hidden_states=encoder_hidden_states if self.only_cross_attention else None,
             attention_mask=attention_mask,
-            lora_weight=lora_weight[0:4],
+            lora_weight=lora_weight[unet_sub_op_slice_list[0]: unet_sub_op_slice_list[4]],
+            unet_sub_op_slice_list = unet_sub_op_slice_list[0: 5],
             **cross_attention_kwargs,
         )
         if self.use_ada_layer_norm_zero:
@@ -305,7 +307,8 @@ class BasicTransformerBlock(nn.Layer):
                 norm_hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
-                lora_weight=lora_weight[4:8],
+                lora_weight=lora_weight[unet_sub_op_slice_list[4]: unet_sub_op_slice_list[8]],
+                unet_sub_op_slice_list =unet_sub_op_slice_list[4: 9] - unet_sub_op_slice_list[4],
                 **cross_attention_kwargs,
             )
             hidden_states = attn_output + hidden_states
@@ -316,7 +319,9 @@ class BasicTransformerBlock(nn.Layer):
         if self.use_ada_layer_norm_zero:
             norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
 
-        ff_output = self.ff(norm_hidden_states, lora_weight=lora_weight[8:10])
+        ff_output = self.ff(norm_hidden_states, 
+            lora_weight=lora_weight[unet_sub_op_slice_list[8]: unet_sub_op_slice_list[10]], 
+            unet_sub_op_slice_list =unet_sub_op_slice_list[8: 11] - unet_sub_op_slice_list[8])
 
         if self.use_ada_layer_norm_zero:
             ff_output = gate_mlp.unsqueeze(1) * ff_output
@@ -372,10 +377,10 @@ class FeedForward(nn.Layer):
         if final_dropout:
             self.net.append(nn.Dropout(dropout))
 
-    def forward(self, hidden_states, lora_weight):
-        hidden_states = self.net[0](hidden_states, lora_weight=lora_weight[0])
+    def forward(self, hidden_states, lora_weight, unet_sub_op_slice_list):
+        hidden_states = self.net[0](hidden_states, lora_weight=lora_weight[unet_sub_op_slice_list[0]: unet_sub_op_slice_list[1]])
         hidden_states = self.net[1](hidden_states)
-        hidden_states = self.net[2](hidden_states, lora_weight=lora_weight[1])
+        hidden_states = self.net[2](hidden_states, lora_weight=lora_weight[unet_sub_op_slice_list[1]: unet_sub_op_slice_list[2]])
         return hidden_states
 
 

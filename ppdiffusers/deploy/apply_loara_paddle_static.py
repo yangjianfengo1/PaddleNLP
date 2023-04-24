@@ -156,10 +156,11 @@ def get_unet_lora_weight(lora_state_dict_list, dtype=paddle.float32):
     op_names2 = [
         "proj_in", "proj_out"
     ]
-    layer_name = "lora_unet_up_blocks_"
-    for block in range(1, up_block_num):
+
+    layer_name = "lora_unet_down_blocks_"
+    for block in range(0, down_block_num - 1):
         block_weight = []
-        for atten in range(up_atten_num):
+        for atten in range(down_atten_num):
             atten_weight = []
             append_unet_blocks_lora_weight(atten_weight, op_names1, True, 
                     lora_state_dict_list, layer_name, block, atten)
@@ -168,20 +169,21 @@ def get_unet_lora_weight(lora_state_dict_list, dtype=paddle.float32):
             block_weight.append(atten_weight)
         unet_lora_weight.append(block_weight)
 
+
     mid_weight = []
     layer_name = "lora_unet_mid_block_attentions_0_transformer_blocks_0_"     
     append_unet_block_lora_weight(mid_weight, op_names1,
         lora_state_dict_list, layer_name)
-    
     layer_name = "lora_unet_up_blocks_1_attentions_0_"     
     append_unet_block_lora_weight(mid_weight, op_names2,
         lora_state_dict_list, layer_name)
-    
     unet_lora_weight.append([mid_weight])
-    layer_name = "lora_unet_down_blocks_"
-    for block in range(0, down_block_num - 1):
+
+
+    layer_name = "lora_unet_up_blocks_"
+    for block in range(1, up_block_num):
         block_weight = []
-        for atten in range(down_atten_num):
+        for atten in range(up_atten_num):
             atten_weight = []
             append_unet_blocks_lora_weight(atten_weight, op_names1, True, 
                     lora_state_dict_list, layer_name, block, atten)
@@ -216,29 +218,42 @@ def add_text_encode_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
     return text_encode_lora_weight
 
 def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
-    res_lora_weight = []
+    res_lora_weight = paddle.to_tensor([])
+    block_slice_list = []
+    atten_slice_list = []
+    sub_op_slice_list = []
     length = len(lora_idx_list)
     for block in lora_weight:
-        atten_weight = []
+        block_slice_list.append(res_lora_weight.shape[0])
         for atten in block:
-            op_lora_weight = []
+            atten_slice_list.append(res_lora_weight.shape[0])
             for sub_op in  atten:
-                lora_weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
+                sub_op_slice_list.append(res_lora_weight.shape[0])
+                weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
                 for i in range(length - 1):
-                    lora_weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]
-                op_lora_weight.append(lora_weight)
-            atten_weight.append(op_lora_weight)
-        res_lora_weight.append(atten_weight)
-    return res_lora_weight
+                    weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]
+                res_lora_weight = paddle.concat([res_lora_weight, weight.reshape([-1])])
+            sub_op_slice_list.append(res_lora_weight.shape[0])
+        atten_slice_list.append(res_lora_weight.shape[0])
+    block_slice_list.append(res_lora_weight.shape[0])
+    slice_list = {
+        "block_slice_list": paddle.to_tensor(block_slice_list),
+        "atten_slice_list": paddle.to_tensor(atten_slice_list),
+        "sub_op_slice_list": paddle.to_tensor(sub_op_slice_list),
+    }
+    return res_lora_weight, slice_list
 
 
-def inference(pipeline, text_encode_lora_weight, unet_lora_weight):
+def inference(pipeline, text_encode_lora_weight, unet_lora_weight, slice_list):
     image = pipeline(
             prompt="masterpiece, best quality, 1 girl, mecha", 
             text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
             text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
             text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
             unet_lora_weight = unet_lora_weight,
+            unet_block_slice_list = slice_list["block_slice_list"],
+            unet_atten_slice_list = slice_list["atten_slice_list"],
+            unet_sub_op_slice_list = slice_list["sub_op_slice_list"],
             negative_prompt="worst quality, low quality, nsfw", 
             guidance_scale=5.0, 
             num_inference_steps=20).images[0]
@@ -263,28 +278,37 @@ def save_mode(pipeline, path="./"):
     save_path = os.path.join(path, "text_encoder", "inference")
     paddle.jit.save(text_encoder, save_path)
 
-    # cross_attention_dim = pipeline.unet.config.cross_attention_dim  # 768 or 1024 or 1280
-    # unet_channels = pipeline.unet.config.in_channels  # 4 or 9
-    # latent_height = 512 // 8
-    # latent_width = 512 // 8
-    # unet = paddle.jit.to_static(
-    #     pipeline.unet,
-    #     input_spec=[
-    #         paddle.static.InputSpec(
-    #             shape=[None, unet_channels, latent_height, latent_width], dtype="float32", name="sample"
-    #         ),  # sample
-    #         paddle.static.InputSpec(shape=[1], dtype="float32", name="timestep"),  # timestep
-    #         paddle.static.InputSpec(
-    #             shape=[None, None, cross_attention_dim], dtype="float32", name="encoder_hidden_states"
-    #         ),  # encoder_hidden_states
-    #         paddle.static.InputSpec(
-    #             shape=[7, None, 12, None, None], dtype="float32", name="lora_weight"
-    #         ) 
-    #     ],
-    # )
+    cross_attention_dim = pipeline.unet.config.cross_attention_dim  # 768 or 1024 or 1280
+    unet_channels = pipeline.unet.config.in_channels  # 4 or 9
+    latent_height = 512 // 8
+    latent_width = 512 // 8
+    unet = paddle.jit.to_static(
+        pipeline.unet,
+        input_spec=[
+            paddle.static.InputSpec(
+                shape=[None, unet_channels, latent_height, latent_width], dtype="float32", name="sample"
+            ),  # sample
+            paddle.static.InputSpec(shape=[1], dtype="float32", name="timestep"),  # timestep
+            paddle.static.InputSpec(
+                shape=[None, None, cross_attention_dim], dtype="float32", name="encoder_hidden_states"
+            ),  # encoder_hidden_states
+            paddle.static.InputSpec(
+                shape=[266977280], dtype="float32", name="lora_weight"
+            ),
+            paddle.static.InputSpec(
+                shape=[8], dtype="float32", name="unet_block_slice_list"
+            ),
+            paddle.static.InputSpec(
+                shape=[23], dtype="float32", name="unet_atten_slice_list"
+            ),
+            paddle.static.InputSpec(
+                shape=[208], dtype="float32", name="unet_sub_op_slice_list"
+            )
+        ],
+    )
     
-    # save_path = os.path.join(path, "unet", "inference")
-    # paddle.jit.save(unet, save_path)
+    save_path = os.path.join(path, "unet", "inference")
+    paddle.jit.save(unet, save_path)
 
 
 
@@ -301,9 +325,9 @@ def run():
     lora_idx_list = [0, 3]
     lora_alpha_list = [0.5, 0.375]
     text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
-    unet_lora_weight = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
-    inference(pipeline, text_encode_lora_weight, unet_lora_weight)
-    
+    unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
+    inference(pipeline, text_encode_lora_weight, unet_lora_weight, slice_list)
+    print("save###############")
     save_mode(pipeline)
 
 if __name__ == "__main__":
