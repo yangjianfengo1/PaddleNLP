@@ -634,8 +634,9 @@ class LoraMultiHeadAttention(nn.MultiHeadAttention):
             need_weights,
             weight_attr,
             bias_attr)
-    def _prepare_qkv(self, query, key, value, lora_weight, cache=None):
-        q = self.q_proj(query, lora_weight[2])
+    def _prepare_qkv(self, query, key, value, text_encode_atten_lora_weight, cache=None):
+        
+        q = self.q_proj(query, text_encode_atten_lora_weight[0])
         q = tensor.reshape(x=q, shape=[0, 0, self.num_heads, self.head_dim])
         q = tensor.transpose(x=q, perm=[0, 2, 1, 3])
 
@@ -643,7 +644,7 @@ class LoraMultiHeadAttention(nn.MultiHeadAttention):
             # for encoder-decoder attention in inference and has cached
             k, v = cache.k, cache.v
         else:
-            k, v = self.compute_kv(key, value, lora_weight)
+            k, v = self.compute_kv(key, value, text_encode_atten_lora_weight)
 
         if isinstance(cache, self.Cache):
             # for decoder self-attention in inference
@@ -653,21 +654,21 @@ class LoraMultiHeadAttention(nn.MultiHeadAttention):
 
         return (q, k, v) if cache is None else (q, k, v, cache)
 
-    def compute_kv(self, key, value, lora_weight):
-        k = self.k_proj(key, lora_weight[3])
-        v = self.v_proj(value, lora_weight[4])
+    def compute_kv(self, key, value, text_encode_atten_lora_weight):
+        k = self.k_proj(key, text_encode_atten_lora_weight[1])
+        v = self.v_proj(value, text_encode_atten_lora_weight[2])
         k = tensor.reshape(x=k, shape=[0, 0, self.num_heads, self.head_dim])
         k = tensor.transpose(x=k, perm=[0, 2, 1, 3])
         v = tensor.reshape(x=v, shape=[0, 0, self.num_heads, self.head_dim])
         v = tensor.transpose(x=v, perm=[0, 2, 1, 3])
         return k, v
 
-    def forward(self, query, key=None, value=None, lora_weight=None, attn_mask=None, cache=None):
+    def forward(self, query, key=None, value=None, text_encode_atten_lora_weight=None, attn_mask=None, cache=None):
         key = query if key is None else key
         value = query if value is None else value
         # compute q ,k ,v
         if cache is None:
-            q, k, v = self._prepare_qkv(query, key, value, lora_weight, cache)
+            q, k, v = self._prepare_qkv(query, key, value, text_encode_atten_lora_weight, cache)
         else:
             q, k, v, cache = self._prepare_qkv(query, key, value, cache)
 
@@ -693,7 +694,7 @@ class LoraMultiHeadAttention(nn.MultiHeadAttention):
         out = tensor.reshape(x=out, shape=[0, 0, out.shape[2] * out.shape[3]])
 
         # project to output
-        out = self.out_proj(out, lora_weight[5])
+        out = self.out_proj(out, text_encode_atten_lora_weight[3])
 
         outs = [out]
         if self.need_weights:
@@ -708,7 +709,7 @@ class LoraLinear(nn.Layer):
         self.weight = weight
         self.bias = bias
     def forward(self, x, lora_weight):
-        out = paddle.mm(x, self.weight + lora_weight) + self.bias
+        out = paddle.mm(x, (self.weight + lora_weight)) + self.bias
         return out
 
 class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
@@ -741,7 +742,12 @@ class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
             weight_attr=weight_attr,
             bias_attr=bias_attr)
 
-    def forward(self, src, lora_weight=None, src_mask=None, cache=None):
+    def forward(self, src, 
+        text_encode_fc1_lora_weight = None,
+        text_encode_fc2_lora_weight = None,
+        text_encode_atten_lora_weight = None,
+        src_mask=None, 
+        cache=None):
         src_mask = _convert_attention_mask(src_mask, src.dtype)
 
         residual = src
@@ -749,9 +755,9 @@ class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
             src = self.norm1(src)
         # Add cache for encoder for the usage like UniLM
         if cache is None:
-            src = self.self_attn(src, src, src, lora_weight, src_mask)
+            src = self.self_attn(src, src, src, text_encode_atten_lora_weight, src_mask)
         else:
-            src, incremental_cache = self.self_attn(src, src, src, lora_weight, src_mask, cache)
+            src, incremental_cache = self.self_attn(src, src, src, text_encode_atten_lora_weight, src_mask, cache)
 
         src = residual + self.dropout1(src)
         if not self.normalize_before:
@@ -760,7 +766,7 @@ class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
         residual = src
         if self.normalize_before:
             src = self.norm2(src)
-        src = self.linear2(self.dropout(self.activation(self.linear1(src, lora_weight[0]))), lora_weight[1])
+        src = self.linear2(self.dropout(self.activation(self.linear1(src, text_encode_fc1_lora_weight))), text_encode_fc2_lora_weight)
         src = residual + self.dropout2(src)
         if not self.normalize_before:
             src = self.norm2(src)
@@ -801,7 +807,9 @@ class LoraTransformerEncoder(nn.TransformerEncoder):
             index += 1
 
     def forward(self, src, 
-            lora_weight,
+            text_encode_fc1_lora_weight = None,
+            text_encode_fc2_lora_weight = None,
+            text_encode_atten_lora_weight = None,
             src_mask=None, 
             cache=None, 
             output_attentions: Optional[bool] = None,
@@ -812,10 +820,16 @@ class LoraTransformerEncoder(nn.TransformerEncoder):
         new_caches = []
         for i, mod in enumerate(self.layers):
             if cache is None:
-                output = mod(output, lora_weight=lora_weight[i], src_mask=src_mask)
+                output = mod(output, 
+                    text_encode_fc1_lora_weight = text_encode_fc1_lora_weight[i][0],
+                    text_encode_fc2_lora_weight = text_encode_fc2_lora_weight[i][0],
+                    text_encode_atten_lora_weight = text_encode_atten_lora_weight[i],
+                    src_mask=src_mask)
             else:
                 output, new_cache = mod(output,
-                                        lora_weight==lora_weight[i],
+                                        text_encode_fc1_lora_weight = text_encode_fc1_lora_weight[i][0],
+                                        text_encode_fc2_lora_weight = text_encode_fc2_lora_weight[i][0],
+                                        text_encode_atten_lora_weight = text_encode_atten_lora_weight[i],
                                         src_mask=src_mask,
                                         cache=cache[i])
                 new_caches.append(new_cache)
@@ -867,7 +881,9 @@ class LoraCLIPTextTransformer(nn.Layer):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        lora_weight: dict = None,
+        text_encode_fc1_lora_weight = None,
+        text_encode_fc2_lora_weight = None,
+        text_encode_atten_lora_weight = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         r"""
         Args:
@@ -917,7 +933,9 @@ class LoraCLIPTextTransformer(nn.Layer):
 
         encoder_outputs = self.transformer(
             embedding_output,
-            lora_weight=lora_weight,
+            text_encode_fc1_lora_weight = text_encode_fc1_lora_weight,
+            text_encode_fc2_lora_weight = text_encode_fc2_lora_weight,
+            text_encode_atten_lora_weight = text_encode_atten_lora_weight,
             src_mask=attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -983,7 +1001,9 @@ class CLIPTextModel(CLIPPretrainedModel):
     def forward(
         self,
         input_ids: Optional[paddle.Tensor] = None,
-        lora_weight: dict = None,
+        text_encode_fc1_lora_weight = None,
+        text_encode_fc2_lora_weight = None,
+        text_encode_atten_lora_weight = None,
         attention_mask: Optional[paddle.Tensor] = None,
         position_ids: Optional[paddle.Tensor] = None,
         output_attentions: Optional[bool] = None,
@@ -1040,7 +1060,9 @@ class CLIPTextModel(CLIPPretrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            lora_weight=lora_weight
+            text_encode_fc1_lora_weight = text_encode_fc1_lora_weight,
+            text_encode_fc2_lora_weight = text_encode_fc2_lora_weight,
+            text_encode_atten_lora_weight = text_encode_atten_lora_weight,
         )
 
 

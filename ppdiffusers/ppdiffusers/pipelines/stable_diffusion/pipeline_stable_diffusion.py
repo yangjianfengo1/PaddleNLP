@@ -169,7 +169,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
         num_images_per_prompt,
         do_classifier_free_guidance,
         negative_prompt = None,
-        lora_weight = None,
+        text_encode_fc1_lora_weight = None,
+        text_encode_fc2_lora_weight = None,
+        text_encode_atten_lora_weight = None,
         prompt_embeds: Optional[paddle.Tensor] = None,
         negative_prompt_embeds: Optional[paddle.Tensor] = None,
     ):
@@ -232,7 +234,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
             prompt_embeds = self.text_encoder(
                 text_input_ids,
                 attention_mask=attention_mask,
-                lora_weight=lora_weight
+                text_encode_fc1_lora_weight = text_encode_fc1_lora_weight,
+                text_encode_fc2_lora_weight = text_encode_fc2_lora_weight,
+                text_encode_atten_lora_weight = text_encode_atten_lora_weight,
             )
             prompt_embeds = prompt_embeds[0]
 
@@ -281,7 +285,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
             negative_prompt_embeds = self.text_encoder(
                 uncond_input.input_ids,
                 attention_mask=attention_mask,
-                lora_weight=lora_weight
+                text_encode_fc1_lora_weight = text_encode_fc1_lora_weight,
+                text_encode_fc2_lora_weight = text_encode_fc2_lora_weight,
+                text_encode_atten_lora_weight = text_encode_atten_lora_weight,
             )
             negative_prompt_embeds = negative_prompt_embeds[0]
 
@@ -406,7 +412,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 50,
-        text_encode_lora_weight: List = None,
+        text_encode_fc1_lora_weight = None,
+        text_encode_fc2_lora_weight = None,
+        text_encode_atten_lora_weight = None,
         unet_lora_weight: List = None,
         guidance_scale: float = 7.5,
         negative_prompt: Optional[Union[str, List[str]]] = None,
@@ -517,7 +525,9 @@ class StableDiffusionPipeline(DiffusionPipeline):
             num_images_per_prompt,
             do_classifier_free_guidance,
             negative_prompt,
-            lora_weight = text_encode_lora_weight,
+            text_encode_fc1_lora_weight = text_encode_fc1_lora_weight,
+            text_encode_fc2_lora_weight = text_encode_fc2_lora_weight,
+            text_encode_atten_lora_weight = text_encode_atten_lora_weight,
             prompt_embeds=prompt_embeds,
             negative_prompt_embeds=negative_prompt_embeds,
         )

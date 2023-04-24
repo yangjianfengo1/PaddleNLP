@@ -17,12 +17,12 @@ from ppdiffusers import (
 lora_file_dir = "/home/yangjianfeng01/apply_lora_diffusers/loras/"
 lora_file_list  = ["mecha.safetensors", "Chibi.safetensors", "Colorwater.safetensors", "MagazineCover.safetensors"]
 model_path = "./runwayml/stable-diffusion-v1-5"
-layers_num = 12
+
 up_block_num = 4
 up_atten_num = 3
 down_block_num = 4
 down_atten_num = 2
-torch_layer_name = ["mlp_fc1", "mlp_fc2", "self_attn_q_proj", "self_attn_k_proj", "self_attn_v_proj", "self_attn_out_proj"]
+
 text_encode_file_path = "./text_encode_weight_bias.safetensors"
 unet_file_path = "./unet_weight_bias.safetensors"
 
@@ -37,12 +37,16 @@ def load_lora_file_weight(lora_file_dir, lora_file_list):
     return lora_state_dict_list
 
 def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
-    text_encode_lora_weight = []
+    layers_num = 12
+    fc1_lora_weight = []
+    fc2_lora_weight = []
+    atten_lora_weight = []
+    atten_layer_name = ["self_attn_q_proj", "self_attn_k_proj", "self_attn_v_proj", "self_attn_out_proj"]
     layer_name = "lora_te_text_model_encoder_layers_"
     for i in range(layers_num):
         index = 0
         ops_lora_weight = []
-        for torch_name in torch_layer_name:
+        for torch_name in atten_layer_name:
             lora_weight_list = []
             for static_dict in lora_state_dict_list:
                 up_name = layer_name + str(i) + "_" + torch_name + ".lora_up.weight"
@@ -52,9 +56,33 @@ def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
                 new_weight = paddle.mm(weight_up, weight_down)
                 lora_weight_list.append(new_weight.T)
             ops_lora_weight.append(lora_weight_list)
-            
-        text_encode_lora_weight.append(ops_lora_weight)    
-    return text_encode_lora_weight
+        atten_lora_weight.append(ops_lora_weight)  
+
+        lora_weight_list = []
+        for static_dict in lora_state_dict_list:
+            up_name = layer_name + str(i) + "_" + "mlp_fc1.lora_up.weight"
+            down_name = layer_name + str(i) + "_" + "mlp_fc1.lora_down.weight"
+            weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
+            weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
+            new_weight = paddle.mm(weight_up, weight_down)
+            lora_weight_list.append(new_weight.T)
+        fc1_lora_weight.append([lora_weight_list])
+
+        lora_weight_list = []
+        for static_dict in lora_state_dict_list:
+            up_name = layer_name + str(i) + "_" + "mlp_fc2.lora_up.weight"
+            down_name = layer_name + str(i) + "_" + "mlp_fc2.lora_down.weight"
+            weight_up = paddle.to_tensor(static_dict[up_name]).astype(dtype)
+            weight_down = paddle.to_tensor(static_dict[down_name]).astype(dtype)
+            new_weight = paddle.mm(weight_up, weight_down)
+            lora_weight_list.append(new_weight.T)
+        fc2_lora_weight.append([lora_weight_list])
+
+    return {
+        "fc1_lora_weight": paddle.to_tensor(fc1_lora_weight),
+        "fc2_lora_weight": paddle.to_tensor(fc2_lora_weight),
+        "atten_lora_weight": paddle.to_tensor(atten_lora_weight)
+    }
 
 def save_text_encode_weight_bias(pipeline, file_name):
     text_encode_weight_bias = {}
@@ -171,18 +199,21 @@ def get_pipeline(model_path):
     )
     return pipeline
 
-def add_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
-    res_lora_weight = []
+def add_text_encode_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
     length = len(lora_idx_list)
-    for layer in lora_weight:
+    text_encode_lora_weight = {}
+    for key in lora_weight:
         layer_weight = []
-        for sub_op in layer:
-            lora_weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
-            for i in range(length - 1):
-                lora_weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]
-            layer_weight.append(lora_weight)
-        res_lora_weight.append(layer_weight)
-    return res_lora_weight
+        for layer in lora_weight[key]:
+            ops_weight = []
+            for sub_op in layer:
+                weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
+                for i in range(length - 1):
+                    weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]  
+                ops_weight.append(weight)
+            layer_weight.append(ops_weight)
+        text_encode_lora_weight[key] = paddle.to_tensor(layer_weight)
+    return text_encode_lora_weight
 
 def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
     res_lora_weight = []
@@ -204,7 +235,9 @@ def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
 def inference(pipeline, text_encode_lora_weight, unet_lora_weight):
     image = pipeline(
             prompt="masterpiece, best quality, 1 girl, mecha", 
-            text_encode_lora_weight = text_encode_lora_weight,
+            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
+            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
+            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
             unet_lora_weight = unet_lora_weight,
             negative_prompt="worst quality, low quality, nsfw", 
             guidance_scale=5.0, 
@@ -217,8 +250,14 @@ def save_mode(pipeline, path="./"):
         input_spec=[
             paddle.static.InputSpec(shape=[None, None], dtype="int64", name="input_ids"),# input_ids
             paddle.static.InputSpec(
-                shape=[layers_num, len(torch_layer_name), None, None], 
-                dtype="float32", name="lora_weight"), #lora_weight
+                shape=[12, 1, None, None], 
+                dtype="float32", name="text_encode_fc1_lora_weight"),
+            paddle.static.InputSpec(
+                shape=[12, 1, None, None], 
+                dtype="float32", name="text_encode_fc2_lora_weight"),
+            paddle.static.InputSpec(
+                shape=[12, 4, None, None], 
+                dtype="float32", name="text_encode_atten_lora_weight"),
         ],  
     )
     save_path = os.path.join(path, "text_encoder", "inference")
@@ -253,7 +292,6 @@ def run():
     lora_state_dict_list = load_lora_file_weight(lora_file_dir, lora_file_list)
     text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
     unet_lora_weight = get_unet_lora_weight(lora_state_dict_list)
-    
     pipeline = get_pipeline(model_path)
     #save_text_encode_weight_bias(pipeline, text_encode_file_path)
     #save_unet_encode_weight_bias(pipeline, unet_file_path)
@@ -262,10 +300,11 @@ def run():
     pipeline.unet.load_weight_bias(get_weight_bias(unet_file_path))
     lora_idx_list = [0, 3]
     lora_alpha_list = [0.5, 0.375]
-    text_encode_lora_weight = add_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
+    text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
 
     unet_lora_weight = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
     inference(pipeline, text_encode_lora_weight, unet_lora_weight)
+    
     save_mode(pipeline)
 
 if __name__ == "__main__":
