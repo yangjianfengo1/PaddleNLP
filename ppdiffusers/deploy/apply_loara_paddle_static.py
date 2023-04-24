@@ -250,41 +250,41 @@ def save_mode(pipeline, path="./"):
         input_spec=[
             paddle.static.InputSpec(shape=[None, None], dtype="int64", name="input_ids"),# input_ids
             paddle.static.InputSpec(
-                shape=[12, 1, None, None], 
+                shape=[12, 1, 768, 3072], 
                 dtype="float32", name="text_encode_fc1_lora_weight"),
             paddle.static.InputSpec(
-                shape=[12, 1, None, None], 
+                shape=[12, 1, 3072, 768], 
                 dtype="float32", name="text_encode_fc2_lora_weight"),
             paddle.static.InputSpec(
-                shape=[12, 4, None, None], 
+                shape=[12, 4, 768, 768], 
                 dtype="float32", name="text_encode_atten_lora_weight"),
         ],  
     )
     save_path = os.path.join(path, "text_encoder", "inference")
     paddle.jit.save(text_encoder, save_path)
 
-    cross_attention_dim = pipeline.unet.config.cross_attention_dim  # 768 or 1024 or 1280
-    unet_channels = pipeline.unet.config.in_channels  # 4 or 9
-    latent_height = 512 // 8
-    latent_width = 512 // 8
-    unet = paddle.jit.to_static(
-        pipeline.unet,
-        input_spec=[
-            paddle.static.InputSpec(
-                shape=[None, unet_channels, latent_height, latent_width], dtype="float32", name="sample"
-            ),  # sample
-            paddle.static.InputSpec(shape=[1], dtype="float32", name="timestep"),  # timestep
-            paddle.static.InputSpec(
-                shape=[None, None, cross_attention_dim], dtype="float32", name="encoder_hidden_states"
-            ),  # encoder_hidden_states
-            paddle.static.InputSpec(
-                shape=[7, None, 12, None, None], dtype="float32", name="lora_weight"
-            ) 
-        ],
-    )
+    # cross_attention_dim = pipeline.unet.config.cross_attention_dim  # 768 or 1024 or 1280
+    # unet_channels = pipeline.unet.config.in_channels  # 4 or 9
+    # latent_height = 512 // 8
+    # latent_width = 512 // 8
+    # unet = paddle.jit.to_static(
+    #     pipeline.unet,
+    #     input_spec=[
+    #         paddle.static.InputSpec(
+    #             shape=[None, unet_channels, latent_height, latent_width], dtype="float32", name="sample"
+    #         ),  # sample
+    #         paddle.static.InputSpec(shape=[1], dtype="float32", name="timestep"),  # timestep
+    #         paddle.static.InputSpec(
+    #             shape=[None, None, cross_attention_dim], dtype="float32", name="encoder_hidden_states"
+    #         ),  # encoder_hidden_states
+    #         paddle.static.InputSpec(
+    #             shape=[7, None, 12, None, None], dtype="float32", name="lora_weight"
+    #         ) 
+    #     ],
+    # )
     
-    save_path = os.path.join(path, "unet", "inference")
-    paddle.jit.save(unet, save_path)
+    # save_path = os.path.join(path, "unet", "inference")
+    # paddle.jit.save(unet, save_path)
 
 
 
@@ -301,7 +301,6 @@ def run():
     lora_idx_list = [0, 3]
     lora_alpha_list = [0.5, 0.375]
     text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
-
     unet_lora_weight = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
     inference(pipeline, text_encode_lora_weight, unet_lora_weight)
     

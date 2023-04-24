@@ -706,10 +706,11 @@ class LoraMultiHeadAttention(nn.MultiHeadAttention):
 class LoraLinear(nn.Layer):
     def __init__(self, weight, bias):
         super().__init__()
-        self.weight = weight
-        self.bias = bias
+        self.weight = paddle.to_tensor(weight)
+        self.bias = paddle.to_tensor(bias)
     def forward(self, x, lora_weight):
-        out = paddle.mm(x, (self.weight + lora_weight)) + self.bias
+        out = self.weight + lora_weight
+        out = paddle.mm(x, out)
         return out
 
 class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
