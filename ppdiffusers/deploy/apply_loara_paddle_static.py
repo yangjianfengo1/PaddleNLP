@@ -327,7 +327,6 @@ def run():
     text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
     unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
     inference(pipeline, text_encode_lora_weight, unet_lora_weight, slice_list)
-    print("save###############")
     save_mode(pipeline)
 
 if __name__ == "__main__":

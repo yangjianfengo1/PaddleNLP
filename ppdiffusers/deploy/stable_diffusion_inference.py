@@ -26,6 +26,10 @@ import numpy as np
 import distutils.util
 
 import paddle.inference as paddle_infer
+from apply_loara_paddle_static import load_lora_file_weight, get_text_encode_lora_weight, get_unet_lora_weight, add_text_encode_lora_weight, add_unet_lora_weight
+
+
+
 # print("ppinfer_path:",paddle_infer.__path__)
 def parse_arguments():
     import argparse
@@ -65,7 +69,7 @@ def parse_arguments():
     parser.add_argument(
         "--backend",
         type=str,
-        default='paddle-tensorrt',
+        default='paddle',
         choices=[
             'paddle',
             "paddle-tensorrt",
@@ -98,15 +102,7 @@ def parse_arguments():
         default=False,
     )
     return parser.parse_args()
-def easy_infer(model, inputs):
-    input_names = model.get_input_names()
-    output_names = model.get_output_names()
-    for i, name in enumerate(input_names):
-        input_tensor = model.get_input_handle(name)
-        input_tensor.copy_from_cpu(inputs[i])
-    model.run()
-    output = model.get_output_handle(output_names[0]).copy_to_cpu()
-    return output
+
 def create_paddle_inference_ppinfer_runtime(model_dir,
                                             model_prefix,
                                             use_trt=False,
@@ -138,6 +134,8 @@ def create_paddle_inference_ppinfer_runtime(model_dir,
         else:
             config.collect_shape_range_info(shapefile)
             collect_shape=True
+            
+    config.delete_pass("multihead_matmul_fuse_pass_v2")
     predictor = paddle_infer.create_predictor(config)
     return predictor
 
@@ -240,6 +238,19 @@ if __name__ == "__main__":
     else:
         raise Exception("backend should be paddle or paddle-trt") 
 
+    lora_file_dir = "/home/yangjianfeng01/apply_lora_diffusers/loras/"
+    lora_file_list  = ["mecha.safetensors", "Chibi.safetensors", "Colorwater.safetensors", "MagazineCover.safetensors"]
+
+    lora_state_dict_list = load_lora_file_weight(lora_file_dir, lora_file_list)
+    text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
+    unet_lora_weight = get_unet_lora_weight(lora_state_dict_list)
+    lora_idx_list = [0, 3]
+    lora_alpha_list = [0.5, 0.375]
+    text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
+    unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
+
+
+
     prompt = "a photo of an astronaut riding a horse on mars"
     pipe = StableDiffusionFastDeployPipeline(
         vae_decoder_runtime=vae_decoder_runtime,
@@ -250,7 +261,14 @@ if __name__ == "__main__":
     )
     if(args.collect_shape):
         scheduler.set_timesteps(1)
-        pipe(prompt, num_inference_steps=1,device_id=args.device_id)
+        pipe(prompt, num_inference_steps=1, device_id=args.device_id, 
+            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
+            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
+            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
+            unet_lora_weight = unet_lora_weight,
+            unet_block_slice_list = slice_list["block_slice_list"],
+            unet_atten_slice_list = slice_list["atten_slice_list"],
+            unet_sub_op_slice_list = slice_list["sub_op_slice_list"])
     else:
         # Warm up
         scheduler.set_timesteps(args.inference_steps)
@@ -262,7 +280,14 @@ if __name__ == "__main__":
             scheduler=scheduler,
             )
 
-        pipe(prompt, num_inference_steps=args.inference_steps,device_id=args.device_id)
+        pipe(prompt, num_inference_steps=args.inference_steps, device_id=args.device_id,
+            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
+            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
+            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
+            unet_lora_weight = unet_lora_weight,
+            unet_block_slice_list = slice_list["block_slice_list"],
+            unet_atten_slice_list = slice_list["atten_slice_list"],
+            unet_sub_op_slice_list = slice_list["sub_op_slice_list"])
 
         time_costs = []
         print(
@@ -270,13 +295,21 @@ if __name__ == "__main__":
         )
         for step in range(args.benchmark_steps):
             start = time.time()
-            image = pipe(prompt, num_inference_steps=args.inference_steps,device_id=args.device_id)[0]
+            image = pipe(prompt, num_inference_steps=args.inference_steps,device_id=args.device_id,
+                text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
+                text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
+                text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
+                unet_lora_weight = unet_lora_weight,
+                unet_block_slice_list = slice_list["block_slice_list"],
+                unet_atten_slice_list = slice_list["atten_slice_list"],
+                unet_sub_op_slice_list = slice_list["sub_op_slice_list"])[0]
             latency = time.time() - start
             time_costs += [latency]
             print(f"No {step:3d} time cost: {latency:2f} s")
+            image.save(args.image_path)
         print(
             f"Mean latency: {np.mean(time_costs):2f} s, p50 latency: {np.percentile(time_costs, 50):2f} s, "
             f"p90 latency: {np.percentile(time_costs, 90):2f} s, p95 latency: {np.percentile(time_costs, 95):2f} s."
         )
-        image.save(args.image_path)
+        # image.save(args.image_path)
         print(f"Image saved in {args.image_path}!")
