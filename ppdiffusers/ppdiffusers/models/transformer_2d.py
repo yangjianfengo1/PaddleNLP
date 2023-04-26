@@ -27,39 +27,38 @@ from .embeddings import PatchEmbed
 from .modeling_utils import ModelMixin
 
 class LoraConvLinear(nn.Layer):
-    def __init__(self, weight, bias):
+    def __init__(self, bias, output_channel):
         super().__init__()
-        self.weight = paddle.to_tensor(weight.squeeze())
-        self.bias = paddle.to_tensor(bias.reshape([1, self.weight.shape[1], 1]))
+        self.bias = paddle.to_tensor(bias.reshape([1, bias.shape[0], 1]))
+        self.output_channel = output_channel
+
     def forward(self, x, lora_weight):
         input_shape = x.shape
-        lora_weight = lora_weight.reshape(self.weight.shape)
-        weight = (self.weight + lora_weight).unsqueeze(0)
+        weight = lora_weight.reshape([1, self.output_channel, self.output_channel])
         weight = paddle.expand(weight, shape=[input_shape[0], weight.shape[1], weight.shape[2]])
         x = x.reshape([input_shape[0], input_shape[1], input_shape[2] * input_shape[3]])
+        
         out = paddle.bmm(weight, x) + self.bias
         out = out.reshape([input_shape[0], weight.shape[2], input_shape[2], input_shape[3]]) 
         return out
 
 class LoraLinearNoBias(nn.Layer):
-    def __init__(self, weight):
+    def __init__(self):
         super().__init__()
-        self.weight = paddle.to_tensor(weight)
 
     def forward(self, x, lora_weight):
-        lora_weight = lora_weight.reshape(self.weight.shape)
-        out = paddle.mm(x, self.weight + lora_weight)
+        lora_weight = lora_weight.reshape([x.shape[-1], -1])
+        out = paddle.mm(x, lora_weight)
         return out
 
 class LoraLinearBias(nn.Layer):
-    def __init__(self, weight, bias):
+    def __init__(self, bias):
         super().__init__()
-        self.weight = paddle.to_tensor(weight)
         self.bias = paddle.to_tensor(bias)
 
     def forward(self, x, lora_weight):
-        lora_weight = lora_weight.reshape(self.weight.shape)
-        out = paddle.mm(x, self.weight + lora_weight) + self.bias
+        lora_weight = lora_weight.reshape([x.shape[-1], -1])
+        out = paddle.mm(x, lora_weight) + self.bias
         return out
 
 @dataclass
@@ -249,21 +248,21 @@ class Transformer2DModel(ModelMixin, ConfigMixin):
             self.proj_out_1 = nn.Linear(inner_dim, 2 * inner_dim)
             self.proj_out_2 = nn.Linear(inner_dim, patch_size * patch_size * self.out_channels)
 
-    def load_weight_bias(self, weight_bias):
-        self.proj_in = LoraConvLinear(weight_bias["proj_in.weight"], weight_bias["proj_in.bias"])
-        self.proj_out = LoraConvLinear(weight_bias["proj_out.weight"], weight_bias["proj_out.bias"])
-        self.transformer_blocks[0].attn1.to_q = LoraLinearNoBias(weight_bias["attn1.to_q.weight"])
-        self.transformer_blocks[0].attn1.to_k = LoraLinearNoBias(weight_bias["attn1.to_k.weight"])
-        self.transformer_blocks[0].attn1.to_v = LoraLinearNoBias(weight_bias["attn1.to_v.weight"])
-        self.transformer_blocks[0].attn1.to_out[0] = LoraLinearBias(weight_bias["attn1.to_out.0.weight"], weight_bias["attn1.to_out.0.bias"])
+    def load_weight_bias(self, weight_bias, output_channel):
+        self.proj_in = LoraConvLinear(weight_bias["proj_in.bias"], output_channel)
+        self.proj_out = LoraConvLinear(weight_bias["proj_out.bias"], output_channel)
+        self.transformer_blocks[0].attn1.to_q = LoraLinearNoBias()
+        self.transformer_blocks[0].attn1.to_k = LoraLinearNoBias()
+        self.transformer_blocks[0].attn1.to_v = LoraLinearNoBias()
+        self.transformer_blocks[0].attn1.to_out[0] = LoraLinearBias(weight_bias["attn1.to_out.0.bias"])
         
-        self.transformer_blocks[0].attn2.to_q = LoraLinearNoBias(weight_bias["attn2.to_q.weight"])
-        self.transformer_blocks[0].attn2.to_k = LoraLinearNoBias(weight_bias["attn2.to_k.weight"])
-        self.transformer_blocks[0].attn2.to_v = LoraLinearNoBias(weight_bias["attn2.to_v.weight"])
-        self.transformer_blocks[0].attn2.to_out[0] = LoraLinearBias(weight_bias["attn2.to_out.0.weight"], weight_bias["attn2.to_out.0.bias"])
+        self.transformer_blocks[0].attn2.to_q = LoraLinearNoBias()
+        self.transformer_blocks[0].attn2.to_k = LoraLinearNoBias()
+        self.transformer_blocks[0].attn2.to_v = LoraLinearNoBias()
+        self.transformer_blocks[0].attn2.to_out[0] = LoraLinearBias(weight_bias["attn2.to_out.0.bias"])
 
-        self.transformer_blocks[0].ff.net[0].proj = LoraLinearBias(weight_bias["ff.net.0.proj.weight"], weight_bias["ff.net.0.proj.bias"])
-        self.transformer_blocks[0].ff.net[2] = LoraLinearBias(weight_bias["ff.net.2.weight"], weight_bias["ff.net.2.bias"])
+        self.transformer_blocks[0].ff.net[0].proj = LoraLinearBias(weight_bias["ff.net.0.proj.bias"])
+        self.transformer_blocks[0].ff.net[2] = LoraLinearBias(weight_bias["ff.net.2.bias"])
     def forward(
         self,
         hidden_states,

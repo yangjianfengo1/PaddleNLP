@@ -26,7 +26,7 @@ import numpy as np
 import distutils.util
 
 import paddle.inference as paddle_infer
-from apply_loara_paddle_static import load_lora_file_weight, get_text_encode_lora_weight, get_unet_lora_weight, add_text_encode_lora_weight, add_unet_lora_weight
+from apply_loara_paddle_static import load_lora_file_weight, get_text_encode_lora_weight, get_unet_lora_weight, add_text_encode_lora_weight, add_unet_lora_weight, get_weight_bias
 
 
 
@@ -88,7 +88,7 @@ def parse_arguments():
     parser.add_argument(
         "--device_id",
         type=int,
-        default=0,
+        default=1,
         help="The selected gpu id. -1 means use cpu")
     parser.add_argument(
         "--scheduler",
@@ -240,14 +240,22 @@ if __name__ == "__main__":
 
     lora_file_dir = "/home/yangjianfeng01/apply_lora_diffusers/loras/"
     lora_file_list  = ["mecha.safetensors", "Chibi.safetensors", "Colorwater.safetensors", "MagazineCover.safetensors"]
+    text_encode_weight_file = "./text_encoder_weight.safetensors"
+    text_encode_bias_file = "./text_encoder_bias.safetensors"
+    unet_weight_file = "./unet_weight.safetensors"
+    unet_bias_file = "./unet_bias.safetensors"
 
     lora_state_dict_list = load_lora_file_weight(lora_file_dir, lora_file_list)
     text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
     unet_lora_weight = get_unet_lora_weight(lora_state_dict_list)
+
     lora_idx_list = [0, 3]
     lora_alpha_list = [0.5, 0.375]
-    text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
-    unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
+    text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, 
+        lora_idx_list, lora_alpha_list, get_weight_bias(text_encode_weight_file))
+
+    unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, 
+        lora_idx_list, lora_alpha_list, get_weight_bias(unet_weight_file))
 
 
 
@@ -262,13 +270,10 @@ if __name__ == "__main__":
     if(args.collect_shape):
         scheduler.set_timesteps(1)
         pipe(prompt, num_inference_steps=1, device_id=args.device_id, 
-            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
-            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
-            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
-            unet_lora_weight = unet_lora_weight,
-            unet_block_slice_list = slice_list["block_slice_list"],
-            unet_atten_slice_list = slice_list["atten_slice_list"],
-            unet_sub_op_slice_list = slice_list["sub_op_slice_list"])
+            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"].numpy(),
+            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"].numpy(),
+            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"].numpy(),
+            unet_lora_weight = unet_lora_weight.numpy())
     else:
         # Warm up
         scheduler.set_timesteps(args.inference_steps)
@@ -281,13 +286,10 @@ if __name__ == "__main__":
             )
 
         pipe(prompt, num_inference_steps=args.inference_steps, device_id=args.device_id,
-            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
-            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
-            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
-            unet_lora_weight = unet_lora_weight,
-            unet_block_slice_list = slice_list["block_slice_list"],
-            unet_atten_slice_list = slice_list["atten_slice_list"],
-            unet_sub_op_slice_list = slice_list["sub_op_slice_list"])
+            text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"].numpy(),
+            text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"].numpy(),
+            text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"].numpy(),
+            unet_lora_weight = unet_lora_weight.numpy())
 
         time_costs = []
         print(
@@ -296,13 +298,10 @@ if __name__ == "__main__":
         for step in range(args.benchmark_steps):
             start = time.time()
             image = pipe(prompt, num_inference_steps=args.inference_steps,device_id=args.device_id,
-                text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
-                text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
-                text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
-                unet_lora_weight = unet_lora_weight,
-                unet_block_slice_list = slice_list["block_slice_list"],
-                unet_atten_slice_list = slice_list["atten_slice_list"],
-                unet_sub_op_slice_list = slice_list["sub_op_slice_list"])[0]
+                text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"].numpy(),
+                text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"].numpy(),
+                text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"].numpy(),
+                unet_lora_weight = unet_lora_weight.numpy())[0]
             latency = time.time() - start
             time_costs += [latency]
             print(f"No {step:3d} time cost: {latency:2f} s")

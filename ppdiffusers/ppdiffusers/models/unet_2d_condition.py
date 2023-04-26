@@ -498,7 +498,10 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         if isinstance(module, (CrossAttnDownBlock2D, DownBlock2D, CrossAttnUpBlock2D, UpBlock2D)):
             module.gradient_checkpointing = value
 
-    def load_weight_bias(self, weight_bias):
+    def load_weight_bias(self, weight_bias, slice_list):
+        self.unet_block_slice_list = slice_list["block_slice_list"]
+        self.unet_atten_slice_list = slice_list["atten_slice_list"]
+        self.unet_sub_op_slice_list = slice_list["sub_op_slice_list"]
         op_names1 = [
             "attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out.0",
             "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out.0",
@@ -513,46 +516,40 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                 up_weight_bias = {}
                 for op in op_names1:
                     name = "up_blocks." + str(block) + ".attentions." + str(atten) + ".transformer_blocks.0." + op
-                    up_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
                     if name + ".bias" in weight_bias:
                         up_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
 
                 for op in op_names2:
                     name = "up_blocks." + str(block) + ".attentions." + str(atten) + "." + op
-                    up_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
                     if name + ".bias" in weight_bias:
                         up_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
-                self.up_blocks[block].attentions[atten].load_weight_bias(up_weight_bias)
+                self.up_blocks[block].attentions[atten].load_weight_bias(up_weight_bias, 2 ** (len(self.up_blocks) - block - 1) * 320)
 
         mid_weight_bias = {}
         for op in op_names1:
             name = "mid_block.attentions.0.transformer_blocks.0." + op
-            mid_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
             if name + ".bias" in weight_bias:
                 mid_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
 
         for op in op_names2:
             name = "mid_block.attentions.0." + op
-            mid_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
             if name + ".bias" in weight_bias:
                 mid_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
-        self.mid_block.attentions[0].load_weight_bias(mid_weight_bias)
+        self.mid_block.attentions[0].load_weight_bias(mid_weight_bias, 1280)
 
         for block in range(len(self.down_blocks) - 1):
             for atten in range(2):
                 down_weight_bias = {}
                 for op in op_names1:
                     name = "down_blocks." + str(block) + ".attentions." + str(atten) + ".transformer_blocks.0." + op
-                    down_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
                     if name + ".bias" in weight_bias:
                         down_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
 
                 for op in op_names2:
                     name = "down_blocks." + str(block) + ".attentions." + str(atten) + "." + op
-                    down_weight_bias[op + ".weight"] = weight_bias[name + ".weight"]
                     if name + ".bias" in weight_bias:
                         down_weight_bias[op + ".bias"] = weight_bias[name + ".bias"]
-                self.down_blocks[block].attentions[atten].load_weight_bias(down_weight_bias)
+                self.down_blocks[block].attentions[atten].load_weight_bias(down_weight_bias, 2 ** block * 320)
 
     def forward(
         self,
@@ -560,9 +557,6 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
         timestep: Union[paddle.Tensor, float, int],
         encoder_hidden_states: paddle.Tensor,
         lora_weight: paddle.Tensor,
-        unet_block_slice_list: paddle.Tensor,
-        unet_atten_slice_list: paddle.Tensor,
-        unet_sub_op_slice_list: paddle.Tensor,
         class_labels: Optional[paddle.Tensor] = None,
         timestep_cond: Optional[paddle.Tensor] = None,
         attention_mask: Optional[paddle.Tensor] = None,
@@ -669,9 +663,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     encoder_hidden_states=encoder_hidden_states,
                     attention_mask=attention_mask,
                     cross_attention_kwargs=cross_attention_kwargs,
-                    lora_weight=lora_weight[unet_block_slice_list[index]: unet_block_slice_list[index + 1]],
-                    unet_atten_slice_list = unet_atten_slice_list[index * 3: (index + 1) * 3] - unet_block_slice_list[index],
-                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 26: (index + 1) * 26] - unet_block_slice_list[index],
+                    lora_weight=lora_weight[self.unet_block_slice_list[index]: self.unet_block_slice_list[index + 1]],
+                    unet_atten_slice_list = self.unet_atten_slice_list[index * 3: (index + 1) * 3],
+                    unet_sub_op_slice_list = self.unet_sub_op_slice_list[index * 26: (index + 1) * 26],
                 )
                 index += 1
             else:
@@ -695,9 +689,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
             sample = self.mid_block(
                 sample,
                 down_nonlinear_temb,
-                lora_weight=lora_weight[unet_block_slice_list[3]: unet_block_slice_list[4]],
-                unet_atten_slice_list = unet_atten_slice_list[9: 11] - unet_block_slice_list[3],
-                unet_sub_op_slice_list = unet_sub_op_slice_list[78: 91] - unet_block_slice_list[3],
+                lora_weight=lora_weight[self.unet_block_slice_list[3]: self.unet_block_slice_list[4]],
+                unet_atten_slice_list = self.unet_atten_slice_list[9: 11],
+                unet_sub_op_slice_list = self.unet_sub_op_slice_list[78: 91],
                 encoder_hidden_states=encoder_hidden_states,
                 attention_mask=attention_mask,
                 cross_attention_kwargs=cross_attention_kwargs,
@@ -726,9 +720,9 @@ class UNet2DConditionModel(ModelMixin, ConfigMixin, UNet2DConditionLoadersMixin)
                     cross_attention_kwargs=cross_attention_kwargs,
                     upsample_size=upsample_size,
                     attention_mask=attention_mask,
-                    lora_weight=lora_weight[unet_block_slice_list[i + 3]: unet_block_slice_list[i + 4]],
-                    unet_atten_slice_list = unet_atten_slice_list[11+(i-1) * 4: 11 + i * 4] - unet_block_slice_list[i + 3],
-                    unet_sub_op_slice_list = unet_sub_op_slice_list[91 + (i - 1) * 39: 91 + i * 39] - unet_block_slice_list[i + 3],
+                    lora_weight=lora_weight[self.unet_block_slice_list[i + 3]: self.unet_block_slice_list[i + 4]],
+                    unet_atten_slice_list = self.unet_atten_slice_list[11+(i-1) * 4: 11 + i * 4],
+                    unet_sub_op_slice_list = self.unet_sub_op_slice_list[91 + (i - 1) * 39: 91 + i * 39],
                 )
             else:
                 sample = upsample_block(

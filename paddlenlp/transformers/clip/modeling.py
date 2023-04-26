@@ -704,12 +704,12 @@ class LoraMultiHeadAttention(nn.MultiHeadAttention):
         return out if len(outs) == 1 else tuple(outs)
 
 class LoraLinear(nn.Layer):
-    def __init__(self, weight, bias):
+    def __init__(self, bias):
         super().__init__()
-        self.weight = paddle.to_tensor(weight)
         self.bias = paddle.to_tensor(bias)
+
     def forward(self, x, lora_weight):
-        out = paddle.mm(x, self.weight + lora_weight) + self.bias
+        out = paddle.mm(x, lora_weight) + self.bias
         return out
 
 class LoraTransformerEncoderLayer(nn.TransformerEncoderLayer):
@@ -780,28 +780,22 @@ class LoraTransformerEncoder(nn.TransformerEncoder):
     def load_weight_bias(self, weight_bias):
         index = 0
         for layer in self.layers:
-            layer.linear1 = LoraLinear(
-                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear1.weight"]), 
+            layer.linear1 = LoraLinear( 
                 paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear1.bias"])
             )
             layer.linear2 = LoraLinear(
-                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear2.weight"]), 
                 paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".linear2.bias"])
             )
             layer.self_attn.q_proj = LoraLinear(
-                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.q_proj.weight"]), 
                 paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.q_proj.bias"])
             )
             layer.self_attn.k_proj = LoraLinear(
-                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.k_proj.weight"]), 
                 paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.k_proj.bias"])
             )
             layer.self_attn.v_proj = LoraLinear(
-                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.v_proj.weight"]), 
                 paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.v_proj.bias"])
             )
             layer.self_attn.out_proj = LoraLinear(
-                paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.out_proj.weight"]), 
                 paddle.to_tensor(weight_bias["text_model.transformer.layers." + str(index) + ".self_attn.out_proj.bias"])
             )
             index += 1

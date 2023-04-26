@@ -1,5 +1,4 @@
 from safetensors import safe_open
-from safetensors.numpy import save_file
 from safetensors.numpy import load as numpy_load
 import numpy as np
 import paddle
@@ -23,8 +22,11 @@ up_atten_num = 3
 down_block_num = 4
 down_atten_num = 2
 
-text_encode_file_path = "./text_encode_weight_bias.safetensors"
-unet_file_path = "./unet_weight_bias.safetensors"
+text_encode_weight_file = "./text_encoder_weight.safetensors"
+text_encode_bias_file = "./text_encoder_bias.safetensors"
+unet_weight_file = "./unet_weight.safetensors"
+unet_bias_file = "./unet_bias.safetensors"
+
 
 def load_lora_file_weight(lora_file_dir, lora_file_list):
     lora_state_dict_list = []
@@ -83,23 +85,6 @@ def get_text_encode_lora_weight(lora_state_dict_list, dtype=paddle.float32):
         "fc2_lora_weight": paddle.to_tensor(fc2_lora_weight),
         "atten_lora_weight": paddle.to_tensor(atten_lora_weight)
     }
-
-def save_text_encode_weight_bias(pipeline, file_name):
-    text_encode_weight_bias = {}
-    for name, op in pipeline.text_encoder.named_sublayers():
-        if "linear" in name or "self_attn." in name:
-            text_encode_weight_bias[name + '.weight'] = op.weight.numpy()
-            text_encode_weight_bias[name + '.bias'] = op.bias.numpy()
-    save_file(text_encode_weight_bias, file_name)
-
-def save_unet_encode_weight_bias(pipeline, unet_file_path):
-    unet_weight_bias = {}
-    for name, op in pipeline.unet.named_sublayers():
-        if ("attn" in name and "to" in name and hasattr(op, "weight")) or "proj_" in name or "ff.net.0." in name or "ff.net.2" in name:
-            unet_weight_bias[name + '.weight'] = op.weight.numpy()
-            if op.bias is not None:
-                unet_weight_bias[name + '.bias'] = op.bias.numpy()
-    save_file(unet_weight_bias, unet_file_path)
 
 
 def get_weight_bias(file_path):
@@ -201,7 +186,7 @@ def get_pipeline(model_path):
     )
     return pipeline
 
-def add_text_encode_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
+def add_text_encode_lora_weight(lora_weight, lora_idx_list, lora_alpha_list, linear_weight):
     length = len(lora_idx_list)
     text_encode_lora_weight = {}
     for key in lora_weight:
@@ -215,9 +200,12 @@ def add_text_encode_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
                 ops_weight.append(weight)
             layer_weight.append(ops_weight)
         text_encode_lora_weight[key] = paddle.to_tensor(layer_weight)
+        text_encode_lora_weight[key] += paddle.to_tensor(
+                linear_weight[key.replace("_lora_", "_")]).reshape(text_encode_lora_weight[key].shape)
     return text_encode_lora_weight
 
-def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
+
+def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list, linear_weight):
     res_lora_weight = paddle.to_tensor([])
     block_slice_list = []
     atten_slice_list = []
@@ -226,34 +214,34 @@ def add_unet_lora_weight(lora_weight, lora_idx_list, lora_alpha_list):
     for block in lora_weight:
         block_slice_list.append(res_lora_weight.shape[0])
         for atten in block:
-            atten_slice_list.append(res_lora_weight.shape[0])
+            atten_slice_list.append(res_lora_weight.shape[0] - block_slice_list[-1])
             for sub_op in  atten:
-                sub_op_slice_list.append(res_lora_weight.shape[0])
+                sub_op_slice_list.append(res_lora_weight.shape[0] - block_slice_list[-1] - atten_slice_list[-1])
                 weight = lora_alpha_list[length - 1] * sub_op[lora_idx_list[length - 1]]
                 for i in range(length - 1):
                     weight += lora_alpha_list[i] * sub_op[lora_idx_list[i]]
                 res_lora_weight = paddle.concat([res_lora_weight, weight.reshape([-1])])
-            sub_op_slice_list.append(res_lora_weight.shape[0])
-        atten_slice_list.append(res_lora_weight.shape[0])
+            sub_op_slice_list.append(res_lora_weight.shape[0]- block_slice_list[-1] - atten_slice_list[-1])
+        atten_slice_list.append(res_lora_weight.shape[0]- block_slice_list[-1])
     block_slice_list.append(res_lora_weight.shape[0])
+
     slice_list = {
         "block_slice_list": paddle.to_tensor(block_slice_list),
         "atten_slice_list": paddle.to_tensor(atten_slice_list),
         "sub_op_slice_list": paddle.to_tensor(sub_op_slice_list),
     }
+    
+    res_lora_weight += paddle.to_tensor(linear_weight["weight"]).reshape(res_lora_weight.shape)
     return res_lora_weight, slice_list
 
 
-def inference(pipeline, text_encode_lora_weight, unet_lora_weight, slice_list):
+def inference(pipeline, text_encode_lora_weight, unet_lora_weight):
     image = pipeline(
             prompt="masterpiece, best quality, 1 girl, mecha", 
             text_encode_fc1_lora_weight = text_encode_lora_weight["fc1_lora_weight"],
             text_encode_fc2_lora_weight = text_encode_lora_weight["fc2_lora_weight"],
             text_encode_atten_lora_weight = text_encode_lora_weight["atten_lora_weight"],
             unet_lora_weight = unet_lora_weight,
-            unet_block_slice_list = slice_list["block_slice_list"],
-            unet_atten_slice_list = slice_list["atten_slice_list"],
-            unet_sub_op_slice_list = slice_list["sub_op_slice_list"],
             negative_prompt="worst quality, low quality, nsfw", 
             guidance_scale=5.0, 
             num_inference_steps=20).images[0]
@@ -294,15 +282,6 @@ def save_mode(pipeline, path="./"):
             ),  # encoder_hidden_states
             paddle.static.InputSpec(
                 shape=[266977280], dtype="float32", name="lora_weight"
-            ),
-            paddle.static.InputSpec(
-                shape=[8], dtype="float32", name="unet_block_slice_list"
-            ),
-            paddle.static.InputSpec(
-                shape=[23], dtype="float32", name="unet_atten_slice_list"
-            ),
-            paddle.static.InputSpec(
-                shape=[208], dtype="float32", name="unet_sub_op_slice_list"
             )
         ],
     )
@@ -317,16 +296,18 @@ def run():
     text_encode_lora_weight = get_text_encode_lora_weight(lora_state_dict_list)
     unet_lora_weight = get_unet_lora_weight(lora_state_dict_list)
     pipeline = get_pipeline(model_path)
-    #save_text_encode_weight_bias(pipeline, text_encode_file_path)
-    #save_unet_encode_weight_bias(pipeline, unet_file_path)
-    
-    pipeline.text_encoder.load_weight_bias(get_weight_bias(text_encode_file_path))
-    pipeline.unet.load_weight_bias(get_weight_bias(unet_file_path))
     lora_idx_list = [0, 3]
     lora_alpha_list = [0.5, 0.375]
-    text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, lora_idx_list, lora_alpha_list)
-    unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, lora_idx_list, lora_alpha_list)
-    inference(pipeline, text_encode_lora_weight, unet_lora_weight, slice_list)
+    text_encode_lora_weight = add_text_encode_lora_weight(text_encode_lora_weight, 
+        lora_idx_list, lora_alpha_list, get_weight_bias(text_encode_weight_file))
+
+    unet_lora_weight, slice_list = add_unet_lora_weight(unet_lora_weight, 
+        lora_idx_list, lora_alpha_list, get_weight_bias(unet_weight_file))
+
+    pipeline.text_encoder.load_weight_bias(get_weight_bias(text_encode_bias_file))
+    pipeline.unet.load_weight_bias(get_weight_bias(unet_bias_file), slice_list)
+
+    inference(pipeline, text_encode_lora_weight, unet_lora_weight)
     save_mode(pipeline)
 
 if __name__ == "__main__":

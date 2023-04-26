@@ -578,7 +578,7 @@ class UNetMidBlock2DCrossAttn(nn.Layer):
         unet_atten_slice_list = None,
         unet_sub_op_slice_list = None,
     ):
-
+        print("####mid.  ", unet_atten_slice_list, unet_sub_op_slice_list)
         hidden_states = self.resnets[0](hidden_states, temb)
         index = 0
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
@@ -868,6 +868,7 @@ class CrossAttnDownBlock2D(nn.Layer):
         unet_atten_slice_list = None,
         unet_sub_op_slice_list = None,
     ):
+        print("####down.  ", unet_atten_slice_list, unet_sub_op_slice_list)
         # TODO(Patrick, William) - attention mask is not used
         output_states = ()
         index = 0
@@ -895,7 +896,7 @@ class CrossAttnDownBlock2D(nn.Layer):
                 hidden_states = attn(
                     hidden_states,
                     lora_weight=lora_weight[unet_atten_slice_list[index]: unet_atten_slice_list[index + 1]],
-                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 13: (index + 1) * 13] - unet_atten_slice_list[index],
+                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 13: (index + 1) * 13],
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
                 ).sample
@@ -1872,6 +1873,7 @@ class CrossAttnUpBlock2D(nn.Layer):
         unet_atten_slice_list = None,
         unet_sub_op_slice_list = None,
     ):
+        print("####up.  ", unet_atten_slice_list, unet_sub_op_slice_list)
         index = 0
         # TODO(Patrick, William) - attention mask is not used
         for resnet, attn in zip(self.resnets, self.attentions):
@@ -1905,7 +1907,7 @@ class CrossAttnUpBlock2D(nn.Layer):
                     encoder_hidden_states=encoder_hidden_states,
                     cross_attention_kwargs=cross_attention_kwargs,
                     lora_weight=lora_weight[unet_atten_slice_list[index]: unet_atten_slice_list[index + 1]],
-                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 13: (index + 1) * 13] - unet_atten_slice_list[index],
+                    unet_sub_op_slice_list = unet_sub_op_slice_list[index * 13: (index + 1) * 13],
                 ).sample
             index += 1
         if self.upsamplers is not None:
